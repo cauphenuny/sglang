@@ -35,6 +35,9 @@ class MiniCPMHybridConfig(PretrainedConfig):
         bos_token_id=1,
         eos_token_id=2,
         tie_word_embeddings=False,
+        max_position_embeddings=32768,
+        rope_theta=10000.0,
+        rope_scaling=None,
         # MiniCPM-specific hybrid config fields
         mixer_types=None,
         minicpm4=None,
@@ -53,19 +56,18 @@ class MiniCPMHybridConfig(PretrainedConfig):
         sparse_use_nope=False,
         **kwargs,
     ):
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
+        # Pop structured MiniCPM fields before PretrainedConfig stores unknown kwargs.
+        sparse_config = kwargs.pop("sparse_config", None)
+
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = head_dim
+        self.max_position_embeddings = max_position_embeddings
+        self.rope_theta = rope_theta
+        self.rope_scaling = rope_scaling
         self.hidden_act = hidden_act
         self.intermediate_size = intermediate_size
         self.initializer_range = initializer_range
@@ -88,7 +90,6 @@ class MiniCPMHybridConfig(PretrainedConfig):
         self.sparse_window_size = sparse_window_size
         self.sparse_use_nope = sparse_use_nope
         # Load sparse_config from original config if available (for backward compatibility)
-        sparse_config = kwargs.pop("sparse_config", None)
         self.has_sparse_config = sparse_config is not None
         if sparse_config is not None:
             self.sparse_block_size = sparse_config.get("block_size", self.sparse_block_size)
@@ -99,6 +100,14 @@ class MiniCPMHybridConfig(PretrainedConfig):
             self.sparse_topk = sparse_config.get("topk", self.sparse_topk)
             self.sparse_window_size = sparse_config.get("window_size", self.sparse_window_size)
             self.sparse_use_nope = sparse_config.get("use_nope", self.sparse_use_nope)
+
+        super().__init__(
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )
 
 
     @property

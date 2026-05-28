@@ -669,4 +669,9 @@ class MiniCPMSALAForCausalLM(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
 
-EntryClass = [MiniCPMSALAForCausalLM]
+
+class MiniCPMForCausalLM(MiniCPMSALAForCausalLM):
+    """Alias for MiniCPM checkpoints whose config uses the HF architecture name."""
+
+
+EntryClass = [MiniCPMSALAForCausalLM, MiniCPMForCausalLM]
