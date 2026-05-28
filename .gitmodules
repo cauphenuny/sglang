@@ -1,7 +1,7 @@
 [submodule "3rdparty/sparse_kernel"]
 	path = 3rdparty/sparse_kernel
-	url = https://github.com/OpenBMB/sparse_kernel.git
+	url = https://github.com/cauphenuny/sparse_kernel.git
 [submodule "3rdparty/infllmv2_cuda_impl"]
 	path = 3rdparty/infllmv2_cuda_impl
-	url = https://github.com/OpenBMB/infllmv2_cuda_impl.git
+	url = https://github.com/cauphenuny/infllmv2_cuda_impl.git
 	branch = minicpm_sala
