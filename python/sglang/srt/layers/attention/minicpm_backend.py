@@ -443,10 +443,14 @@ class MiniCPMSparseBackend(AttentionBackend):
                 if forward_batch.seq_lens_cpu[i] >= self.dense_len:
                     seqlens_q_sparse_list.append(forward_batch.extend_seq_lens_cpu[i])
             
-            seqlen_q_sparse_tensor = torch.tensor(seqlens_q_sparse_list, dtype=torch.int32, device=metadata.cu_seqlens_q.device)
-            cu_seqlen_q_sparse_tensor = F.pad(torch.cumsum(seqlen_q_sparse_tensor, dim=0, dtype=torch.int32), (1, 0))
-            metadata.cu_seqlens_q_adjusted = cu_seqlen_q_sparse_tensor * self.heads_per_group
-            metadata.max_seqlen_q_adjusted = seqlen_q_sparse_tensor.max().item() * self.heads_per_group
+            if len(seqlens_q_sparse_list) > 0:
+                seqlen_q_sparse_tensor = torch.tensor(seqlens_q_sparse_list, dtype=torch.int32, device=metadata.cu_seqlens_q.device)
+                cu_seqlen_q_sparse_tensor = F.pad(torch.cumsum(seqlen_q_sparse_tensor, dim=0, dtype=torch.int32), (1, 0))
+                metadata.cu_seqlens_q_adjusted = cu_seqlen_q_sparse_tensor * self.heads_per_group
+                metadata.max_seqlen_q_adjusted = seqlen_q_sparse_tensor.max().item() * self.heads_per_group
+            else:
+                metadata.cu_seqlens_q_adjusted = metadata.cu_seqlens_q * self.heads_per_group
+                metadata.max_seqlen_q_adjusted = metadata.max_seq_len_q * self.heads_per_group
         else:
             decode_metadata = self.sparse_metadata_builder.build_sparse_decode_metadata(
                 forward_batch=forward_batch,
