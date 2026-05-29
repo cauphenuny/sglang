@@ -2422,7 +2422,7 @@ class ServerArgs:
                 "as the first layer might not be an attention layer"
             )
 
-        elif model_arch in ["MiniCPMForCausalLM"]:
+        elif model_arch in ["MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"]:
             if self.force_dense_minicpm:
                 if self.attention_backend == "minicpm_flashattn":
                     self.attention_backend = "fa3"
