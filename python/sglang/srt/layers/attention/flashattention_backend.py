@@ -38,7 +38,7 @@ from infllm_v2 import (
 )
 
 from sglang.srt.layers.attention.sparse_utils import CompressK, get_compress_k, batched_gather
-import sparse_kernel_extension
+from sglang.jit_kernel.minicpm_sala import get_block_table_v1
 
 @dataclass
 class FlashAttentionMetadata:
@@ -1330,7 +1330,7 @@ class FlashAttentionBackend(AttentionBackend):
 
             assert topk_idx.shape[1] == forward_batch.sparse_q_sparse_bs_tensor.sum().item(), "topk_idx[1] {} vs seqlen_q_as_param sum {}".format(
                 topk_idx.shape[1], forward_batch.sparse_q_sparse_bs_tensor.sum().item())
-            sparse_page_table_sparse_bs = sparse_kernel_extension.get_block_table(
+            sparse_page_table_sparse_bs = get_block_table_v1(
                 topk_idx,
                 page_table,
                 forward_batch.token_to_bs.to(topk_idx.device),
@@ -1902,7 +1902,7 @@ class FlashAttentionBackend(AttentionBackend):
                                                     False,
                                                     decode_batch_id=b)
                         # TODO: change this to modern python code 
-                        ret = sparse_kernel_extension.get_block_table(
+                        ret = get_block_table_v1(
                             topk_idx,
                             page_table[b:b+1],
                             forward_batch.token_to_bs.to(topk_idx.device),

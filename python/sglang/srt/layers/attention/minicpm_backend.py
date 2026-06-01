@@ -21,8 +21,10 @@ if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
 
-import sparse_kernel_extension
-
+from sglang.jit_kernel.minicpm_sala import (
+    get_block_table_v2,
+    get_block_table_v3,
+)
 from sglang.srt.layers.attention.minicpm_attention_kernels import (
     AttentionParams,
     create_attention_kernel,
@@ -961,13 +963,12 @@ class MiniCPMSparseBackend(AttentionBackend):
                 q_reshaped, k, v, q.shape[0], layer, forward_batch
             )
 
-            sparse_page_table_sparse_bs = sparse_kernel_extension.get_block_table_v2(
+            sparse_page_table_sparse_bs = get_block_table_v2(
                 topk_idx,
                 page_table,
                 metadata.token_to_bs,
                 metadata.token_pos_in_bs,
                 metadata.seqlen_k_sparse_bs_tensor,
-                self.sparse_topk
             ).reshape(-1, self.num_sparse_topk_tokens)
 
             # copy page table for sparse bs
@@ -1183,13 +1184,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             forward_batch,
             False,
         )
-        sparse_page_table = sparse_kernel_extension.get_block_table_v3(
+        sparse_page_table = get_block_table_v3(
             topk_idx,
             page_table,
             metadata.token_to_bs,
             cache_seqlens,
             cache_seqlens,
-            self.sparse_topk
         ).reshape(-1, self.num_sparse_topk_tokens)
 
         metadata.sparse_page_table[: 2 * bs, : self.num_sparse_topk_tokens] = (
