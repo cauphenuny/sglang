@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Clone SGLang (minicpm_sala branch) ----
-RUN git clone -b minicpm_sala --recurse-submodules \
+RUN git clone -b minicpm_sala \
         https://github.com/OpenBMB/sglang.git /workspace/sglang
 
 WORKDIR /workspace/sglang
@@ -37,20 +37,21 @@ WORKDIR /workspace/sglang
 RUN pip install --no-cache-dir "cmake>=3.26" setuptools wheel \
     && pip install --no-cache-dir -e "./python[all]"
 
-# ---- Clone & Build infllmv2_cuda_impl ----
-RUN git clone -b minicpm_sala \
-        https://github.com/OpenBMB/infllmv2_cuda_impl.git \
-        /workspace/sglang/3rdparty/infllmv2_cuda_impl \
-    && cd /workspace/sglang/3rdparty/infllmv2_cuda_impl \
-    && git submodule update --init --recursive \
-    && python setup.py install
-
-# ---- Build sparse_kernel (submodule, already cloned) ----
-RUN cd /workspace/sglang/3rdparty/sparse_kernel \
-    && python setup.py install
+# ---- Build sgl-kernel (includes InfLLM v2 kernels) ----
+# InfLLM v2 kernels (max_pooling / bitmask / flash attention stage1) are part of
+# sgl-kernel. The sparse_kernel get_block_table ops live in sglang.jit_kernel and
+# are JIT-compiled at runtime, so no separate build step is required.
+# Use `make build` (wheel install) instead of `make install` (editable) so the
+# arch-specific common_ops .so files install alongside the imported package.
+RUN cd /workspace/sglang/sgl-kernel \
+    && make build
 
 # ---- Install Additional Libraries ----
-RUN pip install --no-cache-dir tilelang flash-linear-attention
+# flash-linear-attention pulls in kernels>=0.15, whose LayerRepository requires an
+# explicit revision/version and breaks `import sglang` (via transformers hub_kernels).
+# Pin back to a compatible release until upstream is fixed.
+RUN pip install --no-cache-dir tilelang flash-linear-attention \
+    && pip install --no-cache-dir "kernels<0.15"
 
 # ---- Default ----
 WORKDIR /workspace/sglang

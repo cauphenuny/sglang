@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 import tilelang
 import tilelang.math
 import triton
-from infllm_v2 import infllmv2_attn_stage1, max_pooling_1d_varlen
+from sgl_kernel import infllmv2_attn_stage1, max_pooling_1d_varlen
 
 from sglang.srt.layers.attention.minicpm_fuse_kernel import _bucket_size
 from sglang.srt.layers.attention.minicpm_sparse_kernels import (

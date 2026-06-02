@@ -32,9 +32,9 @@ from sglang.jit_kernel.flash_attention import (
     flash_attn_with_kvcache,
 )
 
-from infllm_v2 import (
+from sgl_kernel import (
     infllmv2_attn_stage1,
-    max_pooling_1d_varlen
+    max_pooling_1d_varlen,
 )
 
 from sglang.srt.layers.attention.sparse_utils import CompressK, get_compress_k, batched_gather

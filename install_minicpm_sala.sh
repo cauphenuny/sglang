@@ -4,7 +4,6 @@ set -e
 # Get the directory where this script resides (i.e., the sglang repo root)
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${REPO_ROOT}/sglang_minicpm_sala_env"
-DEPS_DIR="${REPO_ROOT}/3rdparty"
 
 # PyPI mirror: prefer CLI argument, then env var, default to official source
 if [ -n "$1" ]; then
@@ -21,13 +20,13 @@ echo "PyPI mirror:    ${UV_INDEX_URL}"
 
 # Check for uv
 if ! command -v uv &> /dev/null; then
-    echo "Error: 'uv' is not installed. Please install it first (e.g., pip install uv)."
-    exit 1
+    echo "'uv' not found. Installing it via pip..."
+    pip install uv || python -m pip install uv
+    if ! command -v uv &> /dev/null; then
+        echo "Error: failed to install 'uv'. Please install it manually (e.g., pip install uv) and re-run."
+        exit 1
+    fi
 fi
-
-# ---- Prepare Dependencies (via git submodule) ----
-echo "[0/4] Initializing submodules (infllmv2_cuda_impl, sparse_kernel)..."
-git submodule update --init --recursive
 
 # ---- Ensure uv-managed Python ----
 REQUIRED_PY="3.12"
@@ -61,7 +60,15 @@ echo "Python: $(python --version)"
 if command -v g++ &> /dev/null; then
     export CC=gcc CXX=g++
 fi
-# Ensure nvcc is in PATH
+# Ensure nvcc is in PATH.
+# Recommended: a full CUDA Toolkit at /usr/local/cuda (ships complete headers,
+# incl. CCCL/libcu++ `nv/target`) so runtime JIT compilation works out of the box.
+# A pip-wheel CUDA (nvidia-cu* wheels) is also supported, e.g. when a newer GPU
+# (Blackwell sm120) needs CUDA 13 but the system nvcc is too old. That path needs
+# a one-time setup (install nvidia-cuda-nvcc/runtime, create the libcudart.so
+# symlink, export LIBRARY_PATH/LD_LIBRARY_PATH in the server shell). See the
+# "使用 pip-wheel CUDA 的额外步骤" section in README_zh.md. JIT also auto-falls
+# back to flashinfer's bundled CCCL headers, so `nv/target` needs no manual fix.
 if [ -z "${CUDA_HOME}" ]; then
     if [ -x /usr/local/cuda/bin/nvcc ]; then
         export CUDA_HOME="/usr/local/cuda"
@@ -74,29 +81,42 @@ fi
 
 # ---- Install Packages ----
 
+# Some `python[all]` deps (e.g. sgl-router) compile from source and need Rust.
+# Warn early with a clear hint instead of failing with a cryptic
+# "can't find Rust compiler" / "edition2024" later.
+if ! command -v cargo &> /dev/null; then
+    echo "Warning: Rust toolchain (cargo) not found. Some dependencies (e.g. sgl-router)"
+    echo "         compile from source and may fail. If you hit 'can't find Rust compiler'"
+    echo "         or 'edition2024', install Rust:"
+    echo "           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+    echo "           source \"\$HOME/.cargo/env\""
+fi
+
 # Install sglang from the repo root
 echo "[2/4] Installing sglang (current directory)..."
 uv pip install "cmake>=3.26"
 uv pip install --upgrade pip setuptools wheel
 uv pip install -e "${REPO_ROOT}/python[all]"
 
-# Build and install CUDA kernel dependencies
-echo "[3/4] Building CUDA kernels..."
-
-# infllm_v2 (has its own submodules, e.g. cutlass)
-echo "  - Installing infllm_v2..."
-cd "${DEPS_DIR}/infllmv2_cuda_impl"
-git submodule update --init --recursive
-python setup.py install
-
-# sparse_kernel
-echo "  - Installing sparse_kernel..."
-cd "${DEPS_DIR}/sparse_kernel"
-python setup.py install
+# Build and install CUDA kernels
+# InfLLM v2 kernels (max_pooling / bitmask / flash attention stage1) are now part
+# of sgl-kernel and are built from source here. The sparse_kernel get_block_table
+# ops live in sglang.jit_kernel and are JIT-compiled at runtime (no build step).
+# Use `make build` (wheel install) rather than `make install` (editable): the
+# editable layout puts the arch-specific common_ops .so under site-packages while
+# `import sgl_kernel` resolves to the source tree, so the sm90/sm100 loader can't
+# find them. A wheel install keeps the package and its .so files together.
+echo "[3/4] Building sgl-kernel (includes InfLLM v2 kernels)..."
+cd "${REPO_ROOT}/sgl-kernel"
+make build
 
 # Install additional libraries
 echo "[4/4] Installing additional libraries..."
 uv pip install tilelang flash-linear-attention
+# flash-linear-attention pulls in kernels>=0.15, whose LayerRepository requires an
+# explicit revision/version and breaks `import sglang` (via transformers hub_kernels).
+# Pin back to a compatible release until upstream is fixed.
+uv pip install "kernels<0.15"
 
 # ---- Done ----
 echo ""
