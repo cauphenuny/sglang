@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import numpy as np
 import torch
@@ -162,16 +162,22 @@ def write_cache_indices(
     for i in range(bs):
         req_idx = req_pool_indices_cpu[i].item()
         prefix_len = prefix_lens_cpu[i].item()
-        k1_len = (prefix_len - kernel_size) // kernel_stride + 1 if kernel_size is not None and kernel_stride > 0 and prefix_len >= kernel_size else 0
+        k1_len = (
+            (prefix_len - kernel_size) // kernel_stride + 1
+            if kernel_size is not None
+            and kernel_stride > 0
+            and prefix_len >= kernel_size
+            else 0
+        )
         if k1_len > 0:
             req_to_token_pool.write_sparse_k1(
-                    (req_idx, slice(0, k1_len)),
-                    prefix_k1_tensors[i],
+                (req_idx, slice(0, k1_len)),
+                prefix_k1_tensors[i],
             )
         if sparse_k1_loc is not None:
             req_to_token_pool.write_sparse_k1(
-                    (req_idx, slice(k1_len, token_num_sparse_k1_cpu[i] + k1_len)),
-                    sparse_k1_loc[pt : pt + token_num_sparse_k1_cpu[i]].to(torch.int32),
+                (req_idx, slice(k1_len, token_num_sparse_k1_cpu[i] + k1_len)),
+                sparse_k1_loc[pt : pt + token_num_sparse_k1_cpu[i]].to(torch.int32),
             )
             pt += token_num_sparse_k1_cpu[i]
     pt = 0
@@ -180,18 +186,25 @@ def write_cache_indices(
     for i in range(bs):
         req_idx = req_pool_indices_cpu[i].item()
         prefix_len = prefix_lens_cpu[i].item()
-        k2_len = (prefix_len - k2_kernel_size) // k2_kernel_stride + 1 if k2_kernel_size is not None and k2_kernel_stride > 0 and prefix_len >= k2_kernel_size else 0
+        k2_len = (
+            (prefix_len - k2_kernel_size) // k2_kernel_stride + 1
+            if k2_kernel_size is not None
+            and k2_kernel_stride > 0
+            and prefix_len >= k2_kernel_size
+            else 0
+        )
         if k2_len > 0:
             req_to_token_pool.write_sparse_k2(
-                    (req_idx, slice(0, k2_len)),
-                    prefix_k2_tensors[i],
+                (req_idx, slice(0, k2_len)),
+                prefix_k2_tensors[i],
             )
         if sparse_k2_loc is not None:
             req_to_token_pool.write_sparse_k2(
-                    (req_idx, slice(k2_len, token_num_sparse_k2_cpu[i] + k2_len)),
-                    sparse_k2_loc[pt : pt + token_num_sparse_k2_cpu[i]].to(torch.int32),
+                (req_idx, slice(k2_len, token_num_sparse_k2_cpu[i] + k2_len)),
+                sparse_k2_loc[pt : pt + token_num_sparse_k2_cpu[i]].to(torch.int32),
             )
             pt += token_num_sparse_k2_cpu[i]
+
 
 def get_last_loc(
     req_to_token: torch.Tensor,
@@ -504,9 +517,13 @@ def alloc_for_extend(
     sparse_k1_loc, sparse_k2_loc = None, None
     if batch.tree_cache.page_size == 1:
         if batch.token_sum_sparse_k1 > 0:
-            sparse_k1_loc = alloc_token_slots(batch.tree_cache, batch.token_sum_sparse_k1)
+            sparse_k1_loc = alloc_token_slots(
+                batch.tree_cache, batch.token_sum_sparse_k1
+            )
         if batch.token_sum_sparse_k2 > 0:
-            sparse_k2_loc = alloc_token_slots(batch.tree_cache, batch.token_sum_sparse_k2)
+            sparse_k2_loc = alloc_token_slots(
+                batch.tree_cache, batch.token_sum_sparse_k2
+            )
         out_cache_loc = alloc_token_slots(batch.tree_cache, batch.extend_num_tokens)
     else:
         # Paged allocation - build last_loc
@@ -543,11 +560,25 @@ def alloc_for_extend(
         prefix_k1_tensors,
         prefix_k2_tensors,
         batch.req_to_token_pool,
-        batch.req_to_token_pool.kernel_size if hasattr(batch.req_to_token_pool, 'kernel_size') else None,
-        batch.req_to_token_pool.kernel_stride if hasattr(batch.req_to_token_pool, 'kernel_stride') else None,
+        (
+            batch.req_to_token_pool.kernel_size
+            if hasattr(batch.req_to_token_pool, "kernel_size")
+            else None
+        ),
+        (
+            batch.req_to_token_pool.kernel_stride
+            if hasattr(batch.req_to_token_pool, "kernel_stride")
+            else None
+        ),
     )
 
-    return out_cache_loc, sparse_k1_loc, sparse_k2_loc, req_pool_indices_device, req_pool_indices
+    return (
+        out_cache_loc,
+        sparse_k1_loc,
+        sparse_k2_loc,
+        req_pool_indices_device,
+        req_pool_indices,
+    )
 
 
 def alloc_paged_token_slots_decode(
@@ -579,7 +610,9 @@ def alloc_paged_token_slots_decode(
     return out_cache_loc
 
 
-def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+def alloc_for_decode(
+    batch: ScheduleBatch, token_per_req: int
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
     Allocate KV cache for decode batch and write to req_to_token_pool.
 
@@ -598,9 +631,13 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> Tuple[torch.Te
         # Non-paged allocation
         out_cache_loc = alloc_token_slots(batch.tree_cache, bs * token_per_req)
         if batch.token_sum_sparse_k1 > 0:
-            sparse_k1_loc = alloc_token_slots(batch.tree_cache, batch.token_sum_sparse_k1)
+            sparse_k1_loc = alloc_token_slots(
+                batch.tree_cache, batch.token_sum_sparse_k1
+            )
         if batch.token_sum_sparse_k2 > 0:
-            sparse_k2_loc = alloc_token_slots(batch.tree_cache, batch.token_sum_sparse_k2)
+            sparse_k2_loc = alloc_token_slots(
+                batch.tree_cache, batch.token_sum_sparse_k2
+            )
     else:
         # Paged allocation
         last_loc = batch.req_to_token_pool.req_to_token[
@@ -632,10 +669,19 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> Tuple[torch.Te
         for i in range(bs):
             if batch.token_num_sparse_k1_cpu[i] > 0:
                 seq_len = batch.seq_lens_cpu[i].item()
-                k1_len = (seq_len - k1_kernel_size) // k1_kernel_stride + 1 if seq_len >= k1_kernel_size else 0
+                k1_len = (
+                    (seq_len - k1_kernel_size) // k1_kernel_stride + 1
+                    if seq_len >= k1_kernel_size
+                    else 0
+                )
                 batch.req_to_token_pool.write_sparse_k1(
-                    (batch.req_pool_indices[i], (k1_len, batch.token_num_sparse_k1_cpu[i] + k1_len)),
-                    sparse_k1_loc[pt : pt + batch.token_num_sparse_k1_cpu[i]].to(torch.int32),
+                    (
+                        batch.req_pool_indices[i],
+                        (k1_len, batch.token_num_sparse_k1_cpu[i] + k1_len),
+                    ),
+                    sparse_k1_loc[pt : pt + batch.token_num_sparse_k1_cpu[i]].to(
+                        torch.int32
+                    ),
                 )
                 pt += batch.token_num_sparse_k1_cpu[i]
     if sparse_k2_loc is not None:
@@ -645,14 +691,24 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> Tuple[torch.Te
         for i in range(bs):
             if batch.token_num_sparse_k2_cpu[i] > 0:
                 seq_len = batch.seq_lens_cpu[i].item()
-                k2_len = (seq_len - k2_kernel_size) // k2_kernel_stride + 1 if seq_len >= k2_kernel_size else 0
+                k2_len = (
+                    (seq_len - k2_kernel_size) // k2_kernel_stride + 1
+                    if seq_len >= k2_kernel_size
+                    else 0
+                )
                 batch.req_to_token_pool.write_sparse_k2(
-                    (batch.req_pool_indices[i], (k2_len, batch.token_num_sparse_k2_cpu[i] + k2_len)),
-                    sparse_k2_loc[pt : pt + batch.token_num_sparse_k2_cpu[i]].to(torch.int32),
+                    (
+                        batch.req_pool_indices[i],
+                        (k2_len, batch.token_num_sparse_k2_cpu[i] + k2_len),
+                    ),
+                    sparse_k2_loc[pt : pt + batch.token_num_sparse_k2_cpu[i]].to(
+                        torch.int32
+                    ),
                 )
                 pt += batch.token_num_sparse_k2_cpu[i]
 
     return out_cache_loc, sparse_k1_loc, sparse_k2_loc
+
 
 def release_kv_cache(req: Req, tree_cache: BasePrefixCache, is_insert: bool = True):
     # MambaRadixCache may alloc mamba state before alloc KV cache

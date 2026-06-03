@@ -371,9 +371,9 @@ class FlashInferKernel(AttentionKernel):
             )
 
             # Update wrapper's internal buffers with converted data
-            #wrapper._paged_kv_indptr_buf.copy_(kv_indptr)
-            #wrapper._paged_kv_indices_buf.copy_(kv_indices)
-            #wrapper._paged_kv_last_page_len_buf.copy_(kv_last_page_len)
+            # wrapper._paged_kv_indptr_buf.copy_(kv_indptr)
+            # wrapper._paged_kv_indices_buf.copy_(kv_indices)
+            # wrapper._paged_kv_last_page_len_buf.copy_(kv_last_page_len)
         else:
             # Non-CUDA graph mode: create wrapper and convert on-the-fly
             if is_prefill:

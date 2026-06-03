@@ -28,12 +28,12 @@ from sglang.srt.mem_cache.memory_pool import (
     HybridReqToTokenPool,
     MHATokenToKVPool,
     MHATokenToKVPoolFP4,
+    MiniCPMReqToTokenPool,
     MLATokenToKVPool,
     MLATokenToKVPoolFP4,
     NoOpMHATokenToKVPool,
     NSATokenToKVPool,
     ReqToTokenPool,
-    MiniCPMReqToTokenPool,
 )
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool, SWATokenToKVPoolAllocator
 from sglang.srt.utils.common import (
@@ -297,7 +297,8 @@ class ModelRunnerKVCacheMixin:
                 if self.model_config.has_sparse_attention:
                     self.req_to_token_pool = MiniCPMHybridReqToTokenPool(
                         size=max_num_reqs,
-                        max_context_len=self.model_config.context_len + extra_max_context_len,
+                        max_context_len=self.model_config.context_len
+                        + extra_max_context_len,
                         device=self.device,
                         enable_memory_saver=self.server_args.enable_memory_saver,
                         kernel_size=self.model_config.sparse_kernel_size,
@@ -311,7 +312,8 @@ class ModelRunnerKVCacheMixin:
                 else:
                     self.req_to_token_pool = HybridReqToTokenPool(
                         size=max_num_reqs,
-                        max_context_len=self.model_config.context_len + extra_max_context_len,
+                        max_context_len=self.model_config.context_len
+                        + extra_max_context_len,
                         device=self.device,
                         enable_memory_saver=self.server_args.enable_memory_saver,
                         cache_params=self.minicpm_hybrid_config.mamba2_cache_params,
@@ -356,8 +358,8 @@ class ModelRunnerKVCacheMixin:
                     + extra_max_context_len,
                     device=self.device,
                     enable_memory_saver=self.server_args.enable_memory_saver,
-                    kernel_size = self.model_config.sparse_kernel_size,
-                    kernel_stride = self.model_config.sparse_kernel_stride,
+                    kernel_size=self.model_config.sparse_kernel_size,
+                    kernel_stride=self.model_config.sparse_kernel_stride,
                 )
             else:
                 self.req_to_token_pool = ReqToTokenPool(

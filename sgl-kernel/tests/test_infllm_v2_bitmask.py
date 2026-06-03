@@ -43,7 +43,9 @@ def test_topk_to_uint64_matches_bitset(num_heads, total_seqlen, k):
     restored = uint64_to_bool(packed, k_blocks)
 
     # Reference bool mask from scatter.
-    ref = torch.zeros(num_heads, total_seqlen, k_blocks, dtype=torch.bool, device="cuda")
+    ref = torch.zeros(
+        num_heads, total_seqlen, k_blocks, dtype=torch.bool, device="cuda"
+    )
     flat_topk = topk.reshape(-1, k)
     flat_ref = ref.reshape(-1, k_blocks)
     for row in range(flat_topk.shape[0]):

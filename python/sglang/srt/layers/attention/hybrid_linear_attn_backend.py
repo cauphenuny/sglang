@@ -1,6 +1,5 @@
 import logging
 import math
-import os
 from typing import Optional, Union
 
 import torch
@@ -22,14 +21,15 @@ from sglang.srt.layers.attention.mamba.mamba_state_scatter_triton import (
 try:
     from fla.ops.simple_gla import chunk_simple_gla
     from fla.ops.simple_gla.fused_recurrent import fused_recurrent_simple_gla
+
     SIMPLE_GLA_AVAILABLE = True
 except ImportError:
     SIMPLE_GLA_AVAILABLE = False
+from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.model_executor.model_runner import ModelRunner
-from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.spec_info import SpecInput
@@ -41,9 +41,7 @@ if not is_cpu():
     )
 
 if is_cuda():
-    from sglang.srt.layers.attention.mamba.causal_conv1d import (
-        causal_conv1d_fn as causal_conv1d_fn_cuda,
-    )
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +59,7 @@ def _build_slope_tensor(nheads: int) -> torch.Tensor:
     Returns:
         slopes: Tensor of shape (nheads,) containing ALiBi slopes
     """
+
     def get_slopes(n):
         def get_slopes_power_of_2(n):
             start = 2 ** (-(2 ** -(math.log2(n) - 3)))
@@ -1067,28 +1066,33 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
 
     def __init__(self, model_runner: ModelRunner):
         super().__init__(model_runner)
-        minicpm_config = getattr(model_runner, 'minicpm_hybrid_config', None)
-        assert minicpm_config is not None, "minicpm_hybrid_config is required for SimpleGLA backend"
+        minicpm_config = getattr(model_runner, "minicpm_hybrid_config", None)
+        assert (
+            minicpm_config is not None
+        ), "minicpm_hybrid_config is required for SimpleGLA backend"
 
         self.conv_states_shape = None
 
         tp_size = get_tensor_model_parallel_world_size()
         total_num_heads = minicpm_config.lightning_nkv or 16
         # Must divide by tp_size, same as OLD implementation
-        assert total_num_heads % tp_size == 0, f"lightning_nkv ({total_num_heads}) must be divisible by tp_size ({tp_size})"
+        assert (
+            total_num_heads % tp_size == 0
+        ), f"lightning_nkv ({total_num_heads}) must be divisible by tp_size ({tp_size})"
         num_heads = total_num_heads // tp_size
         self.num_heads = num_heads
 
-        self.g_gamma = (
-            _build_slope_tensor(num_heads).to(dtype=torch.float32, device=self.device)
-            * (-1.0)
+        self.g_gamma = _build_slope_tensor(num_heads).to(
+            dtype=torch.float32, device=self.device
+        ) * (
+            -1.0
         )  # (h)
 
-        head_dim = getattr(minicpm_config, 'lightning_head_dim', 128)
-        scale_config = getattr(minicpm_config, 'lightning_scale', '1/sqrt(d)')
-        if scale_config == '1/sqrt(d)':
+        head_dim = getattr(minicpm_config, "lightning_head_dim", 128)
+        scale_config = getattr(minicpm_config, "lightning_scale", "1/sqrt(d)")
+        if scale_config == "1/sqrt(d)":
             self.scale = head_dim ** (-0.5)
-        elif scale_config == '1/d':
+        elif scale_config == "1/d":
             self.scale = head_dim ** (-1.0)
         else:
             self.scale = 1.0
@@ -1114,10 +1118,12 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
         Raises:
             RuntimeError: If both sources fail to provide indices
         """
-        if (hasattr(self, 'forward_metadata')
+        if (
+            hasattr(self, "forward_metadata")
             and self.forward_metadata is not None
-            and hasattr(self.forward_metadata, 'mamba_cache_indices')
-            and self.forward_metadata.mamba_cache_indices is not None):
+            and hasattr(self.forward_metadata, "mamba_cache_indices")
+            and self.forward_metadata.mamba_cache_indices is not None
+        ):
             return self.forward_metadata.mamba_cache_indices
         else:
             return self.req_to_token_pool.get_mamba_indices(
@@ -1162,7 +1168,9 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
         seq_lens_cpu: Optional[torch.Tensor],
         forward_batch: Optional[ForwardBatch] = None,
     ):
-        metadata = self._replay_metadata(bs, req_pool_indices, forward_mode, spec_info, seq_lens_cpu)
+        metadata = self._replay_metadata(
+            bs, req_pool_indices, forward_mode, spec_info, seq_lens_cpu
+        )
         self.forward_metadata = metadata
 
     def forward(
@@ -1184,11 +1192,16 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
 
         mamba_indices = self._get_mamba_indices(forward_batch)
         initial_state = None
-        has_initial_state = forward_batch.extend_prefix_lens is not None and forward_batch.extend_prefix_lens > 0
+        has_initial_state = (
+            forward_batch.extend_prefix_lens is not None
+            and forward_batch.extend_prefix_lens > 0
+        )
         if forward_batch.forward_mode.is_decode() or has_initial_state.any():
             cache_idx = self.req_to_token_pool.mamba_map.get(layer_id)
             if cache_idx is not None:
-                layer_cache = self.req_to_token_pool.mamba_pool.mamba2_layer_cache(cache_idx)
+                layer_cache = self.req_to_token_pool.mamba_pool.mamba2_layer_cache(
+                    cache_idx
+                )
                 initial_state = layer_cache.temporal[mamba_indices, :].contiguous()
             else:
                 raise RuntimeError(
@@ -1230,7 +1243,9 @@ class SimpleGLAAttnBackend(MambaAttnBackendBase):
             cache_idx = self.req_to_token_pool.mamba_map.get(layer_id)
 
             if cache_idx is not None:
-                layer_cache = self.req_to_token_pool.mamba_pool.mamba2_layer_cache(cache_idx)
+                layer_cache = self.req_to_token_pool.mamba_pool.mamba2_layer_cache(
+                    cache_idx
+                )
                 layer_cache.temporal[mamba_indices, :] = final_state
             else:
                 raise RuntimeError(

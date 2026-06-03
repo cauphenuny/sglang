@@ -190,7 +190,7 @@ class SimpleGLAStateShape:
     num_heads: int
     head_dim: int
     state_size: int
-    
+
     @staticmethod
     def create(
         *,
@@ -208,10 +208,10 @@ class SimpleGLAStateShape:
         )
 
 
-@dataclass(kw_only=True, frozen=True)  
+@dataclass(kw_only=True, frozen=True)
 class SimpleGLACacheParams(BaseLinearStateParams):
     shape: SimpleGLAStateShape
-    
+
     @property
     def mamba_cache_per_req(self) -> int:
         ssm_numel = int(np.prod(self.shape.temporal))

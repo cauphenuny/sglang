@@ -38,7 +38,9 @@ def topk_to_uint64(
 
     n_uint64_per_row = (k_blocks + 63) // 64
 
-    result = torch.zeros((flat_dims, n_uint64_per_row), dtype=torch.int64, device=topk_idx.device)
+    result = torch.zeros(
+        (flat_dims, n_uint64_per_row), dtype=torch.int64, device=topk_idx.device
+    )
     flat_topk = topk_idx.reshape(flat_dims, k).contiguous()
     torch.ops.sgl_kernel.infllm_v2_topk_to_uint64.default(result, flat_topk)
     return result.reshape(output_shape), k_blocks
@@ -57,7 +59,9 @@ def uint64_to_bool(uint64_array: torch.Tensor, last_dim_size: int) -> torch.Tens
         flat_dims *= d
     flat_uint64 = uint64_array.reshape(flat_dims, n_uint64_per_row).contiguous()
 
-    result = torch.zeros((flat_dims, last_dim_size), dtype=torch.bool, device=uint64_array.device)
+    result = torch.zeros(
+        (flat_dims, last_dim_size), dtype=torch.bool, device=uint64_array.device
+    )
     torch.ops.sgl_kernel.infllm_v2_uint64_to_bool.default(result, flat_uint64)
     return result.reshape(original_shape[:-1] + (last_dim_size,))
 
@@ -77,8 +81,12 @@ def blockmask_to_uint64(blockmask: torch.Tensor) -> Tuple[torch.Tensor, int]:
     flat_dims = 1
     for d in original_shape[:-1]:
         flat_dims *= d
-    flat_blockmask = blockmask.reshape(flat_dims, last_dim_size).to(torch.bool).contiguous()
+    flat_blockmask = (
+        blockmask.reshape(flat_dims, last_dim_size).to(torch.bool).contiguous()
+    )
 
-    result = torch.zeros((flat_dims, n_uint64_per_row), dtype=torch.int64, device=blockmask.device)
+    result = torch.zeros(
+        (flat_dims, n_uint64_per_row), dtype=torch.int64, device=blockmask.device
+    )
     torch.ops.sgl_kernel.infllm_v2_blockmask_to_uint64.default(result, flat_blockmask)
     return result.reshape(original_shape[:-1] + (n_uint64_per_row,)), last_dim_size

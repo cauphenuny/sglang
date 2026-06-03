@@ -27,14 +27,11 @@ def _make_inputs(token_num, seqlen_q_max, topk, batch_size=1, device="cuda"):
         [0, 1, 5, 11, 14, 16, 17, 25, 26, 27], dtype=torch.int32, device=device
     )
 
-    block_table = (
-        torch.arange(1, seqlen_q_max * batch_size + 1, dtype=torch.int32, device=device)
-        .reshape(batch_size, seqlen_q_max)
-    )
+    block_table = torch.arange(
+        1, seqlen_q_max * batch_size + 1, dtype=torch.int32, device=device
+    ).reshape(batch_size, seqlen_q_max)
     token_to_bs = torch.zeros((token_num,), dtype=torch.int32, device=device)
-    token_pos_in_bs = torch.arange(
-        1, token_num + 1, dtype=torch.int32, device=device
-    )
+    token_pos_in_bs = torch.arange(1, token_num + 1, dtype=torch.int32, device=device)
     seqlen_q = torch.tensor([seqlen_q_max], dtype=torch.int32, device=device)
     return topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
 
@@ -50,14 +47,11 @@ def _make_valid_inputs(token_num, seqlen_q_max, topk, batch_size=1, device="cuda
     topk_idx = torch.randint(
         0, num_blocks, (_HEAD_GROUP, token_num, topk), dtype=torch.int32, device=device
     )
-    block_table = (
-        torch.arange(1, seqlen_q_max * batch_size + 1, dtype=torch.int32, device=device)
-        .reshape(batch_size, seqlen_q_max)
-    )
+    block_table = torch.arange(
+        1, seqlen_q_max * batch_size + 1, dtype=torch.int32, device=device
+    ).reshape(batch_size, seqlen_q_max)
     token_to_bs = torch.zeros((token_num,), dtype=torch.int32, device=device)
-    token_pos_in_bs = torch.arange(
-        1, token_num + 1, dtype=torch.int32, device=device
-    )
+    token_pos_in_bs = torch.arange(1, token_num + 1, dtype=torch.int32, device=device)
     seqlen_q = torch.tensor([seqlen_q_max], dtype=torch.int32, device=device)
     return topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
 

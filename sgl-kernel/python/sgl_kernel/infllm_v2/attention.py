@@ -8,7 +8,6 @@ bitmask helpers come from ``sgl_kernel.infllm_v2``.
 from typing import Optional, Tuple, Union
 
 import torch
-
 from sgl_kernel.infllm_v2._loader import load_infllm_ops
 from sgl_kernel.infllm_v2.bitmask import blockmask_to_uint64 as cuda_blockmask_to_uint64
 from sgl_kernel.infllm_v2.bitmask import topk_to_uint64 as cuda_topk_to_uint64
@@ -29,7 +28,9 @@ if torch.__version__ >= "2.4.0":
     _torch_register_fake_wrapper = torch.library.register_fake
 else:
 
-    def noop_custom_op_wrapper(name, fn=None, /, *, mutates_args, device_types=None, schema=None):
+    def noop_custom_op_wrapper(
+        name, fn=None, /, *, mutates_args, device_types=None, schema=None
+    ):
         def wrap(func):
             return func
 
@@ -50,7 +51,9 @@ else:
 
 
 @_torch_custom_op_wrapper(
-    "sgl_infllmv2_attn::_infllmv2_attn_varlen_forward", mutates_args=(), device_types="cuda"
+    "sgl_infllmv2_attn::_infllmv2_attn_varlen_forward",
+    mutates_args=(),
+    device_types="cuda",
 )
 def _infllmv2_attn_varlen_forward(
     q: torch.Tensor,
@@ -97,7 +100,9 @@ def _infllmv2_attn_varlen_forward(
             max_seqlen_q = max_seqlen_q * group_size
 
         assert topk_idx.dtype == torch.int32
-        fwd_blockmask_uint64, _ = cuda_topk_to_uint64(topk_idx, max_seqlen_k, 64)  # N_BLOCK_DIM=64
+        fwd_blockmask_uint64, _ = cuda_topk_to_uint64(
+            topk_idx, max_seqlen_k, 64
+        )  # N_BLOCK_DIM=64
     else:
         fwd_blockmask_uint64 = None
 
@@ -189,7 +194,9 @@ def _infllmv2_attn_varlen_backward(
 
         dout_final = dout.reshape(total_q, nheads_k, group_size, dim)
         dout_final = dout_final.permute(0, 2, 1, 3)
-        dout_final = dout_final.reshape(total_q * group_size, nheads_k, dim).contiguous()
+        dout_final = dout_final.reshape(
+            total_q * group_size, nheads_k, dim
+        ).contiguous()
 
         out_final = out.reshape(total_q, nheads_k, group_size, dim)
         out_final = out_final.permute(0, 2, 1, 3)
@@ -216,7 +223,7 @@ def _infllmv2_attn_varlen_backward(
 
     dq_temp = torch.empty_like(q_final)
 
-    (_, _, _, softmax_d) = infllm_ops.varlen_bwd(
+    _, _, _, softmax_d = infllm_ops.varlen_bwd(
         dout_final,
         q_final,
         k,
@@ -323,7 +330,15 @@ class Infllmv2AttnVarlenFunc(torch.autograd.Function):
             topk_idx=topk_idx,
         )
         ctx.save_for_backward(
-            q, k, v, out_padded, softmax_lse, cu_seqlens_q, cu_seqlens_k, fwd_blockmask_uint64, rng_state
+            q,
+            k,
+            v,
+            out_padded,
+            softmax_lse,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            fwd_blockmask_uint64,
+            rng_state,
         )
         ctx.dropout_p = dropout_p
         ctx.max_seqlen_q = max_seqlen_q
@@ -496,7 +511,11 @@ def infllmv2_attn_stage1(
     nheads_per_group = nheads // nheads_k
 
     q = q.reshape(total_q, nheads_k, nheads_per_group, head_dim)
-    q = q.transpose(1, 2).reshape(total_q * nheads_per_group, nheads_k, head_dim).contiguous()
+    q = (
+        q.transpose(1, 2)
+        .reshape(total_q * nheads_per_group, nheads_k, head_dim)
+        .contiguous()
+    )
 
     result = infllm_ops.varlen_fwd_stage1(
         q,
@@ -570,7 +589,11 @@ def infllmv2_attn_with_kvcache(
         assert topk_idx.dtype == torch.int32
         blockmask, _ = cuda_topk_to_uint64(
             topk_idx,
-            k_cache.shape[1] if block_table is None else block_table.shape[1] * k_cache.shape[1],
+            (
+                k_cache.shape[1]
+                if block_table is None
+                else block_table.shape[1] * k_cache.shape[1]
+            ),
             64,
         )  # N_BLOCK_DIM=64
     else:

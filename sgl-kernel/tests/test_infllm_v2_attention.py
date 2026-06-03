@@ -89,14 +89,30 @@ def test_with_kvcache_dense_matches_reference(head_dim):
 
     q = torch.randn(batch_size, seq_len, n_heads, head_dim, dtype=dtype, device="cuda")
     k_pad = torch.randn(
-        batch_size, cache_len + seq_len, n_kv_heads, head_dim, dtype=dtype, device="cuda"
+        batch_size,
+        cache_len + seq_len,
+        n_kv_heads,
+        head_dim,
+        dtype=dtype,
+        device="cuda",
     )
     v_pad = torch.randn(
-        batch_size, cache_len + seq_len, n_kv_heads, head_dim, dtype=dtype, device="cuda"
+        batch_size,
+        cache_len + seq_len,
+        n_kv_heads,
+        head_dim,
+        dtype=dtype,
+        device="cuda",
     )
-    k = torch.randn(batch_size, seq_len, n_kv_heads, head_dim, dtype=dtype, device="cuda")
-    v = torch.randn(batch_size, seq_len, n_kv_heads, head_dim, dtype=dtype, device="cuda")
-    cache_seqlens = torch.full((batch_size,), cache_len, dtype=torch.int32, device="cuda")
+    k = torch.randn(
+        batch_size, seq_len, n_kv_heads, head_dim, dtype=dtype, device="cuda"
+    )
+    v = torch.randn(
+        batch_size, seq_len, n_kv_heads, head_dim, dtype=dtype, device="cuda"
+    )
+    cache_seqlens = torch.full(
+        (batch_size,), cache_len, dtype=torch.int32, device="cuda"
+    )
 
     kw = dict(k=k, v=v, cache_seqlens=cache_seqlens)
     out_ref = ref.infllmv2_attn_with_kvcache(q, k_pad.clone(), v_pad.clone(), **kw)

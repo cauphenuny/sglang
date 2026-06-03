@@ -1,6 +1,3 @@
-from dataclasses import dataclass
-from typing import Optional
-
 from transformers import PretrainedConfig
 
 from sglang.srt.configs.mamba_utils import SimpleGLACacheParams, SimpleGLAStateShape
@@ -92,13 +89,25 @@ class MiniCPMHybridConfig(PretrainedConfig):
         # Load sparse_config from original config if available (for backward compatibility)
         self.has_sparse_config = sparse_config is not None
         if sparse_config is not None:
-            self.sparse_block_size = sparse_config.get("block_size", self.sparse_block_size)
-            self.sparse_dense_len = sparse_config.get("dense_len", self.sparse_dense_len)
-            self.sparse_init_blocks = sparse_config.get("init_blocks", self.sparse_init_blocks)
-            self.sparse_kernel_size = sparse_config.get("kernel_size", self.sparse_kernel_size)
-            self.sparse_kernel_stride = sparse_config.get("kernel_stride", self.sparse_kernel_stride)
+            self.sparse_block_size = sparse_config.get(
+                "block_size", self.sparse_block_size
+            )
+            self.sparse_dense_len = sparse_config.get(
+                "dense_len", self.sparse_dense_len
+            )
+            self.sparse_init_blocks = sparse_config.get(
+                "init_blocks", self.sparse_init_blocks
+            )
+            self.sparse_kernel_size = sparse_config.get(
+                "kernel_size", self.sparse_kernel_size
+            )
+            self.sparse_kernel_stride = sparse_config.get(
+                "kernel_stride", self.sparse_kernel_stride
+            )
             self.sparse_topk = sparse_config.get("topk", self.sparse_topk)
-            self.sparse_window_size = sparse_config.get("window_size", self.sparse_window_size)
+            self.sparse_window_size = sparse_config.get(
+                "window_size", self.sparse_window_size
+            )
             self.sparse_use_nope = sparse_config.get("use_nope", self.sparse_use_nope)
 
         super().__init__(
@@ -109,7 +118,6 @@ class MiniCPMHybridConfig(PretrainedConfig):
             **kwargs,
         )
 
-
     @property
     def mamba2_cache_params(self):
         """Return Simple GLA cache parameters for lightning attention layers."""
@@ -119,11 +127,16 @@ class MiniCPMHybridConfig(PretrainedConfig):
             lightning_layer_ids = []
         else:
             lightning_layer_ids = [
-                i for i, mixer_type in enumerate(self.mixer_types)
+                i
+                for i, mixer_type in enumerate(self.mixer_types)
                 if mixer_type in ["lightning", "lightning_attn", "lightning-attn"]
             ]
 
-        if not lightning_layer_ids or not self.lightning_nkv or not self.lightning_head_dim:
+        if (
+            not lightning_layer_ids
+            or not self.lightning_nkv
+            or not self.lightning_head_dim
+        ):
             return None
 
         shape = SimpleGLAStateShape.create(
@@ -141,19 +154,26 @@ class MiniCPMHybridConfig(PretrainedConfig):
             return list(range(self.num_hidden_layers))
         else:
             return [
-                i for i, mixer_type in enumerate(self.mixer_types)
-                if mixer_type in ["minicpm4", "minicpm", "standard", "attention", "attn"]
+                i
+                for i, mixer_type in enumerate(self.mixer_types)
+                if mixer_type
+                in ["minicpm4", "minicpm", "standard", "attention", "attn"]
             ]
 
     @property
     def has_sparse_attention(self) -> bool:
         """Check if this config has sparse attention layers (minicpm4 mixer type)."""
-        return self.has_sparse_config and (self.mixer_types is None or any(mt == "minicpm4" for mt in self.mixer_types))
+        return self.has_sparse_config and (
+            self.mixer_types is None or any(mt == "minicpm4" for mt in self.mixer_types)
+        )
 
     @property
     def has_lightning_layers(self) -> bool:
         """Check if this config has lightning attention layers."""
-        return self.mixer_types is not None and any(mt in ["lightning", "lightning_attn", "lightning-attn"] for mt in self.mixer_types)
+        return self.mixer_types is not None and any(
+            mt in ["lightning", "lightning_attn", "lightning-attn"]
+            for mt in self.mixer_types
+        )
 
     @property
     def sparse_layer_ids(self) -> list:
@@ -172,4 +192,8 @@ class MiniCPMHybridConfig(PretrainedConfig):
         if self.mixer_types is None:
             return []
         else:
-            return [i for i, mt in enumerate(self.mixer_types) if mt in ["lightning", "lightning_attn", "lightning-attn"]]
+            return [
+                i
+                for i, mt in enumerate(self.mixer_types)
+                if mt in ["lightning", "lightning_attn", "lightning-attn"]
+            ]

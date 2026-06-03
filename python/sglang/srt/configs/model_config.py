@@ -120,6 +120,7 @@ def is_deepseek_v4(config) -> bool:
         "DeepseekV4ForCausalLMNextN",
     )
 
+
 def get_nsa_index_head_dim(config: PretrainedConfig) -> int:
     assert is_deepseek_nsa(config) or is_deepseek_v4(config)
     return config.index_head_dim
@@ -133,6 +134,7 @@ def get_nsa_index_topk(config: PretrainedConfig) -> int:
 def get_nsa_index_n_heads(config: PretrainedConfig) -> int:
     assert is_deepseek_nsa(config)
     return config.index_n_heads
+
 
 def get_num_indexer_layers(config) -> int:
     """Layer count for the global indexer-topk capturer's host buffer.
@@ -154,7 +156,9 @@ def get_num_indexer_layers(config) -> int:
 def is_minicpm_hybrid(config: PretrainedConfig) -> bool:
     """Check if this is a hybrid MiniCPM model with mixed attention layers"""
     from sglang.srt.configs.minicpm import MiniCPMHybridConfig
+
     return isinstance(config, MiniCPMHybridConfig)
+
 
 class ModelConfig:
     def __init__(
@@ -245,7 +249,7 @@ class ModelConfig:
                 )
             else:
                 enable_multimodal = True
-        
+
         self.force_dense_minicpm = force_dense_minicpm
 
         # Config draft model
@@ -378,7 +382,11 @@ class ModelConfig:
     @property
     def has_sparse_attention(self):
         """Check if model has sparse attention (accesses hf_config.has_sparse_attention)."""
-        return getattr(self.hf_config, "has_sparse_attention", False) if not self.force_dense_minicpm else False
+        return (
+            getattr(self.hf_config, "has_sparse_attention", False)
+            if not self.force_dense_minicpm
+            else False
+        )
 
     @property
     def has_lightning_layers(self):
@@ -388,7 +396,11 @@ class ModelConfig:
     @property
     def sparse_layer_ids(self):
         """Get layer IDs with sparse attention (accesses hf_config.sparse_layer_ids)."""
-        return getattr(self.hf_config, "sparse_layer_ids", []) if not self.force_dense_minicpm else []
+        return (
+            getattr(self.hf_config, "sparse_layer_ids", [])
+            if not self.force_dense_minicpm
+            else []
+        )
 
     @property
     def lightning_layer_ids(self):

@@ -24,7 +24,9 @@ def max_pooling_1d(
     total_len = q_len + cache_len
     out_len = (total_len + block_size - 1) // block_size
 
-    output = torch.zeros(num_heads, q_len, out_len, device=input.device, dtype=input.dtype)
+    output = torch.zeros(
+        num_heads, q_len, out_len, device=input.device, dtype=input.dtype
+    )
     torch.ops.sgl_kernel.infllm_v2_max_pooling_1d.default(
         input,
         output,
@@ -77,7 +79,9 @@ def max_pooling_1d_varlen(
     num_heads = input.shape[0]
     total_q = input.shape[1]
 
-    output = torch.zeros(num_heads, total_q, out_len, device=input.device, dtype=input.dtype)
+    output = torch.zeros(
+        num_heads, total_q, out_len, device=input.device, dtype=input.dtype
+    )
     torch.ops.sgl_kernel.infllm_v2_max_pooling_1d_varlen.default(
         input,
         output,

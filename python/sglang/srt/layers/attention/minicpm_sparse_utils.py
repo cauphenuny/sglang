@@ -7,20 +7,20 @@ combining both backend-agnostic sparse attention components and kernel utilities
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 import math
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange, repeat
 
 if TYPE_CHECKING:
     from sglang.srt.layers.attention.flashattention_backend import (
         FlashAttentionMetadata,
     )
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-    from sglang.srt.mem_cache.memory_pool import KVCache
+
+import math
 
 import tilelang
 import tilelang.math
@@ -32,8 +32,6 @@ from sglang.srt.layers.attention.minicpm_sparse_kernels import (
     compress_k_complete_kernel_new,
     compress_k_complete_kernel_new_padded,
 )
-
-import math
 
 logger = logging.getLogger(__name__)
 
@@ -370,10 +368,16 @@ def allocate_and_compress_keys(
         )
 
     full_compressed_k1 = torch.full(
-        (k1_token_nums, layer.tp_k_head_num, layer.head_dim), dtype=dtype, device=device, fill_value=float('-inf')
+        (k1_token_nums, layer.tp_k_head_num, layer.head_dim),
+        dtype=dtype,
+        device=device,
+        fill_value=float("-inf"),
     )
     full_compressed_k2 = torch.full(
-        (k2_token_nums, layer.tp_k_head_num, layer.head_dim), dtype=dtype, device=device, fill_value=float('-inf')
+        (k2_token_nums, layer.tp_k_head_num, layer.head_dim),
+        dtype=dtype,
+        device=device,
+        fill_value=float("-inf"),
     )
 
     if split_stage1:
@@ -481,7 +485,6 @@ def compressed_attention(
         # else:
         #     q_idx = cache_lens // block_size
 
-
         # split-stage1 -> bmm+softmax+reduce_sum
         if not is_prefilling and split_stage1:
             batch_size = q.shape[0]
@@ -492,10 +495,10 @@ def compressed_attention(
             head_dim = k.shape[2]
             q_reshape = (
                 q.reshape(batch_size, 1, q_head, head_dim)
-                    .transpose(1, 2)
-                    .reshape(batch_size, kv_head, group_size, head_dim)
-                    .transpose(0, 1)
-                    .reshape(-1, group_size, head_dim)
+                .transpose(1, 2)
+                .reshape(batch_size, kv_head, group_size, head_dim)
+                .transpose(0, 1)
+                .reshape(-1, group_size, head_dim)
             )
             k_reshape = (
                 k.reshape(batch_size, k1_len // batch_size, kv_head, head_dim)
@@ -504,13 +507,15 @@ def compressed_attention(
                 .transpose(0, 1)
                 .reshape(-1, head_dim, k1_len // batch_size)
             )
-    
+
             scale = 1.0 / math.sqrt(head_dim)
             score = torch.bmm(q_reshape, k_reshape).mul_(scale)
             torch.nan_to_num(score, nan=float("-inf"), posinf=float("-inf"), out=score)
             torch.softmax(score, dim=-1, out=score)
-            score = score.reshape(kv_head, batch_size, group_size, k1_len // batch_size).sum(dim=2)
-        else:  
+            score = score.reshape(
+                kv_head, batch_size, group_size, k1_len // batch_size
+            ).sum(dim=2)
+        else:
             score = infllmv2_attn_stage1(
                 q.contiguous(),
                 k.contiguous(),
@@ -520,7 +525,7 @@ def compressed_attention(
                 cu_seqlens_v=cu_seqlens_k2,
                 max_seqlen_q=max_seqlen_q_adjusted,
                 max_seqlen_k=max_context_len // kernel_stride,
-                causal=is_prefilling
+                causal=is_prefilling,
             )
 
         block_score = max_pooling_1d_varlen(
@@ -579,7 +584,6 @@ def compressed_attention_tilelang(
         # Fixed max_cache_len for CUDA Graph compatibility (avoid .item() calls)
         # max_cache_len = 525312  # 512k
 
-
         # Get tensor dimensions
         # q shape: [total_q_len, num_kv_heads, groups, head_dim] or [total_q_len, num_heads, head_dim]
         # k shape: [total_k_len, num_kv_heads, head_dim]
@@ -600,7 +604,11 @@ def compressed_attention_tilelang(
         # q shape: [total_q_len, num_heads, head_dim]
         # Need to reshape to [total_q_len * groups, num_kv_heads, head_dim]
         q_kernel = q.view(total_q_len, num_kv_heads, groups, head_dim)
-        q_kernel = q_kernel.transpose(1, 2).reshape(total_q_len * groups, num_kv_heads, head_dim).contiguous()
+        q_kernel = (
+            q_kernel.transpose(1, 2)
+            .reshape(total_q_len * groups, num_kv_heads, head_dim)
+            .contiguous()
+        )
 
         k_kernel = k.contiguous()
 
@@ -619,14 +627,15 @@ def compressed_attention_tilelang(
 
         assert fused_kernel is not None, "fused_kernel is not initialized"
 
-
         # Pooling parameters - aligned with infllmv2_cuda_impl:
         # block_stride = block_size // kernel_stride = 64 // 16 = 4
         # pad_len = kernel_size // kernel_stride - 1 = 32 // 16 - 1 = 1
         # num_offs = kernel_size // kernel_stride + block_size // kernel_stride - 1 = 2 + 4 - 1 = 5
         pooling_block_stride = block_size // kernel_stride  # = 64 // 16 = 4
         pooling_pad_len = kernel_size // kernel_stride - 1  # = 32 // 16 - 1 = 1
-        pooling_num_offs = kernel_size // kernel_stride + block_size // kernel_stride - 1  # = 2 + 4 - 1 = 5
+        pooling_num_offs = (
+            kernel_size // kernel_stride + block_size // kernel_stride - 1
+        )  # = 2 + 4 - 1 = 5
 
         # Compute actual output topk (same as original: min(topk, num_blocks))
         output_topk = min(topk, pooled_k_len)
@@ -648,8 +657,18 @@ def compressed_attention_tilelang(
             dtype_str = "bfloat16"
 
         # Allocate output tensors
-        topk_indices = torch.full((num_kv_heads, total_q_len, kernel_topk), -1, dtype=torch.int32, device=q.device)
-        topk_values = torch.full((num_kv_heads, total_q_len, kernel_topk), float('-inf'), dtype=torch.float32, device=q.device)
+        topk_indices = torch.full(
+            (num_kv_heads, total_q_len, kernel_topk),
+            -1,
+            dtype=torch.int32,
+            device=q.device,
+        )
+        topk_values = torch.full(
+            (num_kv_heads, total_q_len, kernel_topk),
+            float("-inf"),
+            dtype=torch.float32,
+            device=q.device,
+        )
 
         if is_prefilling:
             # =================================================================
@@ -667,14 +686,22 @@ def compressed_attention_tilelang(
             # For standard prefill: cache_lens is None -> use zeros
             # For chunk prefill: cache_lens has values -> use as-is
             if cache_lens is None:
-                cache_lens_tensor = torch.zeros(batch_size, dtype=torch.int32, device=q.device)
+                cache_lens_tensor = torch.zeros(
+                    batch_size, dtype=torch.int32, device=q.device
+                )
             else:
                 cache_lens_tensor = cache_lens.to(torch.int32)
 
-
-
             # Run prefill kernel with cache_lens for chunk prefill support
-            fused_kernel(q_kernel, k_kernel, cu_seqlens_q, cu_seqlens_k, cache_lens_tensor, topk_indices, topk_values)
+            fused_kernel(
+                q_kernel,
+                k_kernel,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                cache_lens_tensor,
+                topk_indices,
+                topk_values,
+            )
         else:
             # =================================================================
             # DECODE: max_seqlen_q=1 (fixed), cache_lens passed as tensor
@@ -703,7 +730,15 @@ def compressed_attention_tilelang(
             # )
 
             # Run decode kernel with cache_lens as tensor
-            fused_kernel(q_kernel, k_kernel, cu_seqlens_q, cu_seqlens_k, cache_lens_tensor, topk_indices, topk_values)
+            fused_kernel(
+                q_kernel,
+                k_kernel,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                cache_lens_tensor,
+                topk_indices,
+                topk_values,
+            )
 
         # Note: q_idx masking is handled inside the kernel via causal_mask
         # which sets scores to -1e9 for K blocks beyond the causal boundary.
@@ -902,7 +937,9 @@ class SparseBatchAnalyzer:
         """
         self.config = config
 
-    def identify_sparse_batches(self, forward_batch: ForwardBatch, dense_as_sparse: bool) -> list[int]:
+    def identify_sparse_batches(
+        self, forward_batch: ForwardBatch, dense_as_sparse: bool
+    ) -> list[int]:
         """Identify sparse batches in the forward batch.
 
         A batch is considered sparse if its sequence length is >= dense_len.
@@ -920,12 +957,17 @@ class SparseBatchAnalyzer:
 
         for i in range(batch_size):
             # Check if sequence length exceeds dense_len threshold
-            if forward_batch.seq_lens_cpu[i] >= self.config.dense_len or dense_as_sparse:
+            if (
+                forward_batch.seq_lens_cpu[i] >= self.config.dense_len
+                or dense_as_sparse
+            ):
                 sparse_bs_list.append(i)
 
         return sparse_bs_list
 
-    def is_sparse_batch(self, batch_idx: int, forward_batch: ForwardBatch, dense_as_sparse: bool) -> bool:
+    def is_sparse_batch(
+        self, batch_idx: int, forward_batch: ForwardBatch, dense_as_sparse: bool
+    ) -> bool:
         """Check if a specific batch index needs sparse attention.
 
         Args:
@@ -935,7 +977,10 @@ class SparseBatchAnalyzer:
         Returns:
             True if the batch needs sparse attention, False otherwise
         """
-        return bool(forward_batch.seq_lens_cpu[batch_idx] >= self.config.dense_len or dense_as_sparse)
+        return bool(
+            forward_batch.seq_lens_cpu[batch_idx] >= self.config.dense_len
+            or dense_as_sparse
+        )
 
     def get_sparse_batch_count(self, forward_batch: ForwardBatch) -> int:
         """Get the count of sparse batches in the forward batch.

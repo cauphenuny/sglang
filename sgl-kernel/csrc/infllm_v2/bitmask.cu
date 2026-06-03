@@ -25,8 +25,8 @@ namespace {
 constexpr int kThreadsPerBlock = 256;
 
 // One thread per output uint64 [row, col]; row in [0, batch), col in [0, n_uint64_per_row).
-__global__ void topk_to_uint64_kernel(
-    const int* topk_idx, uint64_t* result, int batch_size, int k, int n_uint64_per_row) {
+__global__ void
+topk_to_uint64_kernel(const int* topk_idx, uint64_t* result, int batch_size, int k, int n_uint64_per_row) {
   const int linear = blockIdx.x * blockDim.x + threadIdx.x;
   if (linear >= batch_size * n_uint64_per_row) return;
   const int row = linear / n_uint64_per_row;
@@ -45,8 +45,8 @@ __global__ void topk_to_uint64_kernel(
 }
 
 // One thread per output bool [row, col]; row in [0, batch), col in [0, last_dim_size).
-__global__ void uint64_to_bool_kernel(
-    const uint64_t* input, uint8_t* result, int batch_size, int last_dim_size, int n_uint64_per_row) {
+__global__ void
+uint64_to_bool_kernel(const uint64_t* input, uint8_t* result, int batch_size, int last_dim_size, int n_uint64_per_row) {
   const int linear = blockIdx.x * blockDim.x + threadIdx.x;
   if (linear >= batch_size * last_dim_size) return;
   const int row = linear / last_dim_size;
@@ -96,7 +96,10 @@ void infllm_v2_topk_to_uint64(at::Tensor result, at::Tensor topk_idx) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   topk_to_uint64_kernel<<<num_blocks, kThreadsPerBlock, 0, stream>>>(
-      topk_idx.data_ptr<int>(), reinterpret_cast<uint64_t*>(result.data_ptr<int64_t>()), batch_size, k,
+      topk_idx.data_ptr<int>(),
+      reinterpret_cast<uint64_t*>(result.data_ptr<int64_t>()),
+      batch_size,
+      k,
       n_uint64_per_row);
 }
 
@@ -117,7 +120,10 @@ void infllm_v2_uint64_to_bool(at::Tensor result, at::Tensor input) {
 
   uint64_to_bool_kernel<<<num_blocks, kThreadsPerBlock, 0, stream>>>(
       reinterpret_cast<const uint64_t*>(input.data_ptr<int64_t>()),
-      reinterpret_cast<uint8_t*>(result.data_ptr<bool>()), batch_size, last_dim_size, n_uint64_per_row);
+      reinterpret_cast<uint8_t*>(result.data_ptr<bool>()),
+      batch_size,
+      last_dim_size,
+      n_uint64_per_row);
 }
 
 // blockmask: [batch, last_dim_size] bool ; result: [batch, n_uint64_per_row] int64.
@@ -137,5 +143,8 @@ void infllm_v2_blockmask_to_uint64(at::Tensor result, at::Tensor blockmask) {
 
   blockmask_to_uint64_kernel<<<num_blocks, kThreadsPerBlock, 0, stream>>>(
       reinterpret_cast<const uint8_t*>(blockmask.data_ptr<bool>()),
-      reinterpret_cast<uint64_t*>(result.data_ptr<int64_t>()), batch_size, last_dim_size, n_uint64_per_row);
+      reinterpret_cast<uint64_t*>(result.data_ptr<int64_t>()),
+      batch_size,
+      last_dim_size,
+      n_uint64_per_row);
 }

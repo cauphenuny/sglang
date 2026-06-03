@@ -40,8 +40,8 @@ __global__ void max_pooling_1d_varlen_kernel(
     int block_size,
     int local_blocks,
     int init_blocks) {
-  const int bidh = blockIdx.y;          // head index
-  const int bidq_global = blockIdx.x;   // global query index across all batches
+  const int bidh = blockIdx.y;         // head index
+  const int bidq_global = blockIdx.x;  // global query index across all batches
 
   int batch_idx = 0;
   int q_start = 0, q_end = 0, k_start = 0, k_end = 0;
@@ -62,8 +62,8 @@ __global__ void max_pooling_1d_varlen_kernel(
   if (bidq_local >= seqlen_q) return;
 
   const size_t total_q_all = static_cast<size_t>(cu_seqlens_q[batch_size]);
-  const size_t in_offset = static_cast<size_t>(bidh) * total_q_all * max_seqlen_k +
-                           static_cast<size_t>(bidq_global) * max_seqlen_k;
+  const size_t in_offset =
+      static_cast<size_t>(bidh) * total_q_all * max_seqlen_k + static_cast<size_t>(bidq_global) * max_seqlen_k;
   const T* in = input + in_offset;
   const size_t out_offset =
       static_cast<size_t>(bidh) * total_q_all * out_len + static_cast<size_t>(bidq_global) * out_len;
@@ -75,8 +75,7 @@ __global__ void max_pooling_1d_varlen_kernel(
 
   for (int k = threadIdx.x; k < out_len; k += blockDim.x) {
     const int off_bk = k;
-    const bool should_mask_inf =
-        (off_bk < init_blocks) || ((off_bq >= off_bk) && (off_bq <= off_bk + local_blocks));
+    const bool should_mask_inf = (off_bk < init_blocks) || ((off_bq >= off_bk) && (off_bq <= off_bk + local_blocks));
 
     if (should_mask_inf) {
       out[k] = pos_inf;
@@ -124,8 +123,7 @@ __global__ void max_pooling_1d_kernel(
 
   for (int k = threadIdx.x; k < out_len; k += blockDim.x) {
     const int off_bk = k;
-    const bool should_mask_inf =
-        (off_bk < init_blocks) || ((off_bq >= off_bk) && (off_bq <= off_bk + local_blocks));
+    const bool should_mask_inf = (off_bk < init_blocks) || ((off_bq >= off_bk) && (off_bq <= off_bk + local_blocks));
 
     if (should_mask_inf) {
       out[k] = pos_inf;

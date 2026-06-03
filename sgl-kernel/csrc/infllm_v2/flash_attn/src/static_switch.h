@@ -27,62 +27,62 @@
   }()
 
 #ifdef FLASHATTENTION_DISABLE_DROPOUT
-  #define DROPOUT_SWITCH(COND, CONST_NAME, ...) \
-  [&] {                                         \
-    constexpr static bool CONST_NAME = false;   \
-    return __VA_ARGS__();                       \
+#define DROPOUT_SWITCH(COND, CONST_NAME, ...) \
+  [&] {                                       \
+    constexpr static bool CONST_NAME = false; \
+    return __VA_ARGS__();                     \
   }()
 #else
-  #define DROPOUT_SWITCH BOOL_SWITCH
+#define DROPOUT_SWITCH BOOL_SWITCH
 #endif
 
 #ifdef FLASHATTENTION_DISABLE_ALIBI
-  #define ALIBI_SWITCH(COND, CONST_NAME, ...)   \
-  [&] {                                         \
-    constexpr static bool CONST_NAME = false;   \
-    return __VA_ARGS__();                       \
+#define ALIBI_SWITCH(COND, CONST_NAME, ...)   \
+  [&] {                                       \
+    constexpr static bool CONST_NAME = false; \
+    return __VA_ARGS__();                     \
   }()
 #else
-  #define ALIBI_SWITCH BOOL_SWITCH
+#define ALIBI_SWITCH BOOL_SWITCH
 #endif
 
 #ifdef FLASHATTENTION_DISABLE_UNEVEN_K
-  #define EVENK_SWITCH(COND, CONST_NAME, ...)   \
-  [&] {                                         \
-    constexpr static bool CONST_NAME = true;    \
-    return __VA_ARGS__();                       \
+#define EVENK_SWITCH(COND, CONST_NAME, ...)  \
+  [&] {                                      \
+    constexpr static bool CONST_NAME = true; \
+    return __VA_ARGS__();                    \
   }()
 #else
-  #define EVENK_SWITCH BOOL_SWITCH
+#define EVENK_SWITCH BOOL_SWITCH
 #endif
 
 #ifdef FLASHATTENTION_DISABLE_SOFTCAP
-  #define SOFTCAP_SWITCH(COND, CONST_NAME, ...)   \
-  [&] {                                         \
-    constexpr static bool CONST_NAME = false;    \
-    return __VA_ARGS__();                       \
+#define SOFTCAP_SWITCH(COND, CONST_NAME, ...) \
+  [&] {                                       \
+    constexpr static bool CONST_NAME = false; \
+    return __VA_ARGS__();                     \
   }()
 #else
-  #define SOFTCAP_SWITCH BOOL_SWITCH
+#define SOFTCAP_SWITCH BOOL_SWITCH
 #endif
 
 #ifdef FLASHATTENTION_DISABLE_LOCAL
-  #define LOCAL_SWITCH(COND, CONST_NAME, ...)   \
-  [&] {                                         \
-    constexpr static bool CONST_NAME = false;    \
-    return __VA_ARGS__();                       \
+#define LOCAL_SWITCH(COND, CONST_NAME, ...)   \
+  [&] {                                       \
+    constexpr static bool CONST_NAME = false; \
+    return __VA_ARGS__();                     \
   }()
 #else
-  #define LOCAL_SWITCH BOOL_SWITCH
+#define LOCAL_SWITCH BOOL_SWITCH
 #endif
 
-#define FP16_SWITCH(COND, ...)               \
-  [&] {                                      \
-      using elem_type = cutlass::bfloat16_t;     \
-      return __VA_ARGS__();                  \
+#define FP16_SWITCH(COND, ...)             \
+  [&] {                                    \
+    using elem_type = cutlass::bfloat16_t; \
+    return __VA_ARGS__();                  \
   }()
 
-#define HEADDIM_SWITCH(HEADDIM, ...)   \
+#define HEADDIM_SWITCH(HEADDIM, ...)       \
   [&] {                                    \
     if (HEADDIM == 64) {                   \
       constexpr static int kHeadDim = 64;  \

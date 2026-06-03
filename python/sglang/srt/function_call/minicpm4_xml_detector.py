@@ -8,17 +8,19 @@ from sglang.srt.entrypoints.openai.protocol import Tool
 from sglang.srt.function_call.base_format_detector import BaseFormatDetector
 from sglang.srt.function_call.core_types import (
     StreamingParseResult,
-    StructureInfo,
     _GetInfoFunc,
 )
+
 logger = logging.getLogger(__name__)
 
 # Prefer lxml if available for more robust XML parsing; fallback to stdlib otherwise
 try:
     from lxml import etree as ET  # type: ignore
+
     _HAS_LXML = True
 except Exception:  # pragma: no cover - environment may not have lxml
     import xml.etree.ElementTree as ET  # type: ignore
+
     _HAS_LXML = False
 
 # Precompiled regex patterns for fallback parsing and validation
@@ -27,6 +29,7 @@ _PARAM_WITH_NAME_REGEX = re.compile(
     r"<param\s+name=[\'\"]([^\'\"]+)[\'\"]>([\s\S]*?)</param>", re.DOTALL
 )
 _PARAM_MISSING_NAME_REGEX = re.compile(r"<param(?![^>]*\bname=)[^>]*>", re.DOTALL)
+
 
 def get_argument_type(func_name: str, arg_key: str, defined_tools: list):
     name2tool = {tool.function.name: tool for tool in defined_tools}
@@ -102,7 +105,9 @@ class MiniCPM4XmlFormatDetector(BaseFormatDetector):
         name_to_required = {}
         for name, t in name_to_tool.items():
             params = t.function.parameters or {}
-            props = (params.get("properties", {}) or {}) if isinstance(params, dict) else {}
+            props = (
+                (params.get("properties", {}) or {}) if isinstance(params, dict) else {}
+            )
             name_to_allowed_props[name] = set(props.keys())
             req = params.get("required", []) if isinstance(params, dict) else []
             try:
@@ -137,14 +142,18 @@ class MiniCPM4XmlFormatDetector(BaseFormatDetector):
                     if root.tag == "function":
                         func_node = root
                     else:
-                        func_node = root.find("function") if hasattr(root, "find") else None
+                        func_node = (
+                            root.find("function") if hasattr(root, "find") else None
+                        )
 
                     if func_node is not None:
                         # function name is in attribute
                         func_name = (func_node.attrib.get("name") or "").strip()
 
                     # Prefer direct <param> children; also support legacy <arguments><param/></arguments>
-                    args_node = func_node.find("arguments") if func_node is not None else None
+                    args_node = (
+                        func_node.find("arguments") if func_node is not None else None
+                    )
                     param_nodes = []
                     if func_node is not None:
                         param_nodes = list(func_node.findall("param"))
@@ -169,7 +178,7 @@ class MiniCPM4XmlFormatDetector(BaseFormatDetector):
                                 has_invalid_param = True
                                 break
                             seen_keys.add(key)
-                            val_text = (param.text or "")
+                            val_text = param.text or ""
                             val_text = val_text.strip()
                             arg_type = get_argument_type(func_name or "", key, tools)
                             if arg_type != "string":
@@ -207,9 +216,11 @@ class MiniCPM4XmlFormatDetector(BaseFormatDetector):
                                 has_invalid_param = True
                                 break
                             seen_keys.add(key)
-                            val_text = (pm.group(2) or "")
+                            val_text = pm.group(2) or ""
                             # Strip CDATA wrapper if present
-                            if val_text.startswith("<![CDATA[") and val_text.endswith("]]>"):
+                            if val_text.startswith("<![CDATA[") and val_text.endswith(
+                                "]]>"
+                            ):
                                 val_text = val_text[len("<![CDATA[") : -len("]]>")]
                             val_text = val_text.strip()
                             arg_type = get_argument_type(func_name or "", key, tools)
@@ -277,7 +288,9 @@ class MiniCPM4XmlFormatDetector(BaseFormatDetector):
                 self.prev_tool_call_arr.append({})
             while len(self.streamed_args_for_tool) <= self.current_tool_id:
                 self.streamed_args_for_tool.append("")
-            result = self.detect_and_parse(current_text[: end + len(self.eot_token)], tools=tools)
+            result = self.detect_and_parse(
+                current_text[: end + len(self.eot_token)], tools=tools
+            )
             if result.calls:
                 self.prev_tool_call_arr[self.current_tool_id] = {
                     "name": result.calls[0].name,
@@ -302,4 +315,6 @@ class MiniCPM4XmlFormatDetector(BaseFormatDetector):
 
     def build_ebnf(self, tools: List[Tool]):
         """Not supported in this sglang version (no EBNFComposer)."""
-        raise NotImplementedError("EBNFComposer is not available in this sglang version")
+        raise NotImplementedError(
+            "EBNFComposer is not available in this sglang version"
+        )

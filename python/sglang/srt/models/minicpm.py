@@ -23,12 +23,6 @@ from torch import nn
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import SimpleGLAAttnBackend
-from sglang.srt.layers.attention.minicpm_sparse_utils import (
-    SparseBatchAnalyzer,
-    SparseConfig,
-    SparseMetadata,
-    SparseMetadataBuilder,
-)
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -454,6 +448,7 @@ class MiniCPMDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+
     def _compute_topk(self, forward_batch, base_metadata, sparse_metadata):
         """Compute TopK indices for sparse attention.
 

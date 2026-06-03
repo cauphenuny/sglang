@@ -2409,7 +2409,6 @@ class ServerArgs:
                     sm100_default_attention_backend="triton",
                 )
 
-
         elif model_arch in ["Lfm2ForCausalLM"]:
             self._handle_mamba_radix_cache(
                 model_arch=model_arch,

@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 if ENABLE_JIT_DEEPGEMM:
     import deep_gemm
+
     try:
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor  # noqa: F401
     except (ImportError, ModuleNotFoundError):

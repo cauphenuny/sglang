@@ -300,7 +300,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     sparse_k2_loc: torch.Tensor = None
     token_num_sparse_k1_cpu: torch.Tensor = None
     token_num_sparse_k2_cpu: torch.Tensor = None
-    
+
     # The original sequence length without being chunked. Qwen-1M related.
     orig_seq_lens: Optional[torch.Tensor] = None
 
@@ -450,7 +450,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     sparse_batch_size: int = 0
     # sparse_page_table: Optional[torch.Tensor] = None
 
-    # Record the original positions of sparse requests to run dense 
+    # Record the original positions of sparse requests to run dense
     # and sparse requests simultaneously
     sparse_idx: Optional[List[int]] = None
 
@@ -458,32 +458,32 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
 
     # decode, only used in decode
     # sparse_cache_seqlens_cpu: Optional[torch.Tensor] = None
-    
+
     # sparse
     sparse_cache_seqlens_int32_cpu: Optional[torch.Tensor] = None
     sparse_cu_seqlens_k_cpu: Optional[torch.Tensor] = None
     cu_seqlens_k1_cpu: Optional[torch.Tensor] = None
     cu_seqlens_k2_cpu: Optional[torch.Tensor] = None
-    
+
     history_compress_k1_token_nums_cpu: Optional[torch.Tensor] = None
-    
+
     new_k1_token_nums_cpu: Optional[torch.Tensor] = None
     cu_new_k1_token_nums_cpu: Optional[torch.Tensor] = None
-    
+
     new_compress_k1_token_nums_cpu: Optional[torch.Tensor] = None
     cu_new_compress_k1_token_nums_cpu: Optional[torch.Tensor] = None
-    
+
     total_compress_k1_token_nums_cpu: Optional[torch.Tensor] = None
     cu_total_compress_k1_token_nums_cpu: Optional[torch.Tensor] = None
-    
+
     history_compress_k2_token_nums_cpu: Optional[torch.Tensor] = None
-    
+
     new_k2_token_nums_cpu: Optional[torch.Tensor] = None
     cu_new_k2_token_nums_cpu: Optional[torch.Tensor] = None
-    
+
     new_compress_k2_token_nums_cpu: Optional[torch.Tensor] = None
     cu_new_compress_k2_token_nums_cpu: Optional[torch.Tensor] = None
-    
+
     total_compress_k2_token_nums_cpu: Optional[torch.Tensor] = None
     cu_total_compress_k2_token_nums_cpu: Optional[torch.Tensor] = None
 
