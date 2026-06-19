@@ -82,6 +82,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+SPARSE_K1_AUX_POOL = "sparse_k1"
+SPARSE_K2_AUX_POOL = "sparse_k2"
+
 GB = 1024 * 1024 * 1024
 _is_cuda = is_cuda()
 _is_npu = is_npu()
@@ -973,6 +976,331 @@ def unwrap_write_loc(loc_info):
     if isinstance(loc_info, KVWriteLoc):
         return loc_info.loc, loc_info.swa_loc
     return loc_info, None
+
+
+class MiniCPMAuxReqToTokenPool:
+    """MiniCPM sparse-attention indices owned by the MiniCPM req token pool."""
+
+    def __init__(self, pool):
+        self.pool = pool
+        self.prefix_indices: dict[str, dict[str, torch.Tensor]] = {}
+
+    def _enabled(self) -> bool:
+        return (
+            self.pool.kernel_size is not None
+            and self.pool.kernel_stride is not None
+            and self.pool.kernel_stride > 0
+            and self.pool.req_to_sparse_k1_token is not None
+            and self.pool.req_to_sparse_k2_token is not None
+        )
+
+    def _sparse_len(self, length: int, scale: int) -> int:
+        if not self._enabled():
+            return 0
+        kernel_size = self.pool.kernel_size * scale
+        kernel_stride = self.pool.kernel_stride * scale
+        return (
+            (length - kernel_size) // kernel_stride + 1 if length >= kernel_size else 0
+        )
+
+    def _token_nums_for_extend(
+        self, seq_lens_cpu: torch.Tensor, prefix_lens_cpu: torch.Tensor, scale: int
+    ) -> torch.Tensor:
+        if not self._enabled():
+            return torch.zeros_like(seq_lens_cpu)
+
+        kernel_size = self.pool.kernel_size * scale
+        kernel_stride = self.pool.kernel_stride * scale
+        total = torch.clamp((seq_lens_cpu - kernel_size) // kernel_stride + 1, min=0)
+        prefix = torch.clamp(
+            (prefix_lens_cpu - kernel_size) // kernel_stride + 1, min=0
+        )
+        return total - prefix
+
+    def _token_nums_for_decode(
+        self, seq_lens_cpu: torch.Tensor, token_per_req: int, scale: int
+    ) -> torch.Tensor:
+        if not self._enabled():
+            return torch.zeros_like(seq_lens_cpu)
+
+        kernel_size = self.pool.kernel_size * scale
+        kernel_stride = self.pool.kernel_stride * scale
+        before = torch.clamp((seq_lens_cpu - kernel_size) // kernel_stride + 1, min=0)
+        after = torch.clamp(
+            (seq_lens_cpu + token_per_req - kernel_size) // kernel_stride + 1,
+            min=0,
+        )
+        return after - before
+
+    def token_nums_for_extend(
+        self, seq_lens_cpu: torch.Tensor, prefix_lens_cpu: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        return {
+            SPARSE_K1_AUX_POOL: self._token_nums_for_extend(
+                seq_lens_cpu, prefix_lens_cpu, scale=1
+            ),
+            SPARSE_K2_AUX_POOL: self._token_nums_for_extend(
+                seq_lens_cpu, prefix_lens_cpu, scale=4
+            ),
+        }
+
+    def token_nums_for_decode(
+        self, seq_lens_cpu: torch.Tensor, token_per_req: int
+    ) -> dict[str, torch.Tensor]:
+        return {
+            SPARSE_K1_AUX_POOL: self._token_nums_for_decode(
+                seq_lens_cpu, token_per_req, scale=1
+            ),
+            SPARSE_K2_AUX_POOL: self._token_nums_for_decode(
+                seq_lens_cpu, token_per_req, scale=4
+            ),
+        }
+
+    def write_extend_indices(
+        self,
+        req_pool_indices_cpu: torch.Tensor,
+        prefix_lens_cpu: torch.Tensor,
+        aux_token_nums: dict[str, torch.Tensor],
+        aux_locs: dict[str, torch.Tensor],
+        reqs: list[Req],
+    ):
+        if not self._enabled():
+            return
+
+        aux_specs = (
+            (SPARSE_K1_AUX_POOL, 1, self.pool.write_sparse_k1),
+            (SPARSE_K2_AUX_POOL, 4, self.pool.write_sparse_k2),
+        )
+        for name, scale, write_fn in aux_specs:
+            token_nums = aux_token_nums.get(name)
+            loc = aux_locs.get(name)
+            pt = 0
+            for i in range(req_pool_indices_cpu.shape[0]):
+                req = reqs[i]
+                req_idx = req_pool_indices_cpu[i].item()
+                prefix_len = prefix_lens_cpu[i].item()
+                sparse_prefix_len = self._sparse_len(prefix_len, scale=scale)
+                if sparse_prefix_len > 0:
+                    prefix_indices = self.prefix_indices.get(req.rid, {}).get(name)
+                    assert (
+                        prefix_indices is not None
+                    ), f"Missing MiniCPM {name} prefix indices for request {req.rid}"
+                    write_fn(
+                        (req_idx, slice(0, sparse_prefix_len)),
+                        prefix_indices,
+                    )
+
+                token_num = token_nums[i].item() if token_nums is not None else 0
+                if loc is not None and token_num > 0:
+                    write_fn(
+                        (
+                            req_idx,
+                            slice(sparse_prefix_len, sparse_prefix_len + token_num),
+                        ),
+                        loc[pt : pt + token_num].to(torch.int32),
+                    )
+                    pt += token_num
+
+    def write_decode_indices(
+        self,
+        req_pool_indices: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        aux_token_nums: dict[str, torch.Tensor],
+        aux_locs: dict[str, torch.Tensor],
+    ):
+        if not self._enabled():
+            return
+
+        aux_specs = (
+            (SPARSE_K1_AUX_POOL, 1, self.pool.write_sparse_k1),
+            (SPARSE_K2_AUX_POOL, 4, self.pool.write_sparse_k2),
+        )
+        for name, scale, write_fn in aux_specs:
+            token_nums = aux_token_nums.get(name)
+            loc = aux_locs.get(name)
+            if token_nums is None or loc is None:
+                continue
+
+            pt = 0
+            for i in range(req_pool_indices.shape[0]):
+                token_num = token_nums[i].item()
+                if token_num <= 0:
+                    continue
+
+                seq_len = seq_lens_cpu[i].item()
+                sparse_len = self._sparse_len(seq_len, scale=scale)
+                write_fn(
+                    (
+                        req_pool_indices[i],
+                        slice(sparse_len, sparse_len + token_num),
+                    ),
+                    loc[pt : pt + token_num].to(torch.int32),
+                )
+                pt += token_num
+
+    def free_token_indices(self, req: Req, token_to_kv_pool_allocator, length: int):
+        if not self._enabled():
+            return
+
+        k1_len = self._sparse_len(length, scale=1)
+        if k1_len > 0:
+            token_to_kv_pool_allocator.free(
+                self.pool.req_to_sparse_k1_token[req.req_pool_idx, :k1_len]
+            )
+
+        k2_len = self._sparse_len(length, scale=4)
+        if k2_len > 0:
+            token_to_kv_pool_allocator.free(
+                self.pool.req_to_sparse_k2_token[req.req_pool_idx, :k2_len]
+            )
+        self.clear_prefix_indices(req)
+
+    def set_prefix_indices(self, req: Req, length: int):
+        if not self._enabled():
+            self.clear_prefix_indices(req)
+            return
+
+        k1_len = self._sparse_len(length, scale=1)
+        k2_len = self._sparse_len(length, scale=4)
+        self.prefix_indices[req.rid] = {
+            SPARSE_K1_AUX_POOL: self.pool.req_to_sparse_k1_token[
+                req.req_pool_idx, :k1_len
+            ].to(dtype=torch.int64, copy=True),
+            SPARSE_K2_AUX_POOL: self.pool.req_to_sparse_k2_token[
+                req.req_pool_idx, :k2_len
+            ].to(dtype=torch.int64, copy=True),
+        }
+
+    def clear_prefix_indices(self, req: Req):
+        self.prefix_indices.pop(req.rid, None)
+
+
+class MiniCPMReqToTokenPool(ReqToTokenPool):
+    """A memory pool that maps a request to its token locations."""
+
+    def __init__(
+        self,
+        size: int,
+        max_context_len: int,
+        device: str,
+        enable_memory_saver: bool,
+        kernel_size: int,
+        kernel_stride: int,
+    ):
+        super().__init__(
+            size=size,
+            max_context_len=max_context_len,
+            device=device,
+            enable_memory_saver=enable_memory_saver,
+        )
+        self.kernel_size = kernel_size
+        self.kernel_stride = kernel_stride
+        memory_saver_adapter = TorchMemorySaverAdapter.create(
+            enable=enable_memory_saver
+        )
+
+        with memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            self.req_to_sparse_k1_token = torch.zeros(
+                (
+                    self._alloc_size,
+                    int((max_context_len - kernel_size) / kernel_stride) + 1,
+                ),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.req_to_sparse_k2_token = torch.zeros(
+                (
+                    self._alloc_size,
+                    int((max_context_len - kernel_size * 4) / (kernel_stride * 4)) + 1,
+                ),
+                dtype=torch.int32,
+                device=device,
+            )
+        self.aux_pool = MiniCPMAuxReqToTokenPool(self)
+
+    def write_sparse_k1(self, indices, values):
+        self.req_to_sparse_k1_token[indices] = values
+
+    def write_sparse_k2(self, indices, values):
+        self.req_to_sparse_k2_token[indices] = values
+
+
+class MiniCPMHybridReqToTokenPool(HybridReqToTokenPool):
+    """Hybrid memory pool for MiniCPM with sparse attention and Simple GLA."""
+
+    def __init__(
+        self,
+        *,
+        size: int,
+        max_context_len: int,
+        device: str,
+        enable_memory_saver: bool,
+        kernel_size: int,
+        kernel_stride: int,
+        cache_params=None,
+        mamba_size: int = None,
+        mamba_spec_state_size: int = None,
+        enable_mamba_extra_buffer: bool = False,
+        speculative_num_draft_tokens: int = None,
+        mamba_layer_ids: List[int] = None,
+        enable_overlap_schedule: bool = True,
+        **kwargs,
+    ):
+        if mamba_layer_ids is None and cache_params is not None:
+            mamba_layer_ids = getattr(cache_params, "layers", [])
+
+        super().__init__(
+            size=size,
+            mamba_size=mamba_size if mamba_size is not None else size,
+            mamba_spec_state_size=(
+                mamba_spec_state_size if mamba_spec_state_size is not None else 0
+            ),
+            max_context_len=max_context_len,
+            device=device,
+            enable_memory_saver=enable_memory_saver,
+            cache_params=cache_params,
+            enable_mamba_extra_buffer=enable_mamba_extra_buffer,
+            speculative_num_draft_tokens=speculative_num_draft_tokens,
+            mamba_layer_ids=mamba_layer_ids or [],
+            enable_overlap_schedule=enable_overlap_schedule,
+        )
+
+        self.kernel_size = kernel_size
+        self.kernel_stride = kernel_stride
+
+        if kernel_size is not None and kernel_stride is not None:
+            memory_saver_adapter = TorchMemorySaverAdapter.create(
+                enable=enable_memory_saver
+            )
+            with memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+                k1_size = (max_context_len - kernel_size) // kernel_stride + 1
+                k2_size = (max_context_len - kernel_size * 4) // (kernel_stride * 4) + 1
+
+                self.req_to_sparse_k1_token = torch.zeros(
+                    (self._alloc_size, k1_size), dtype=torch.int32, device=device
+                )
+                self.req_to_sparse_k2_token = torch.zeros(
+                    (self._alloc_size, k2_size), dtype=torch.int32, device=device
+                )
+        else:
+            self.req_to_sparse_k1_token = None
+            self.req_to_sparse_k2_token = None
+        self.aux_pool = MiniCPMAuxReqToTokenPool(self)
+
+    def write_sparse_k1(self, indices, values):
+        if self.req_to_sparse_k1_token is not None:
+            self.req_to_sparse_k1_token[indices] = values
+
+    def write_sparse_k2(self, indices, values):
+        if self.req_to_sparse_k2_token is not None:
+            self.req_to_sparse_k2_token[indices] = values
+
+    def clear(self):
+        super().clear()
+        if self.req_to_sparse_k1_token is not None:
+            self.req_to_sparse_k1_token.zero_()
+        if self.req_to_sparse_k2_token is not None:
+            self.req_to_sparse_k2_token.zero_()
 
 
 class KVCache(abc.ABC):
