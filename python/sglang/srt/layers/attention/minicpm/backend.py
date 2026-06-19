@@ -524,7 +524,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             raise NotImplementedError(
                 "MiniCPM backend does not support speculative decoding (target verify)"
             )
-        if forward_batch.forward_mode.is_draft_extend(include_v2=True):
+        if forward_batch.forward_mode.is_draft_extend_v2():
             raise NotImplementedError(
                 "MiniCPM backend does not support speculative decoding (draft extend)"
             )
@@ -1024,7 +1024,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             raise NotImplementedError(
                 "MiniCPM backend does not support cross attention"
             )
-        if forward_batch.forward_mode.is_draft_extend(include_v2=True):
+        if forward_batch.forward_mode.is_draft_extend_v2():
             raise NotImplementedError(
                 "MiniCPM backend does not support draft extend mode"
             )

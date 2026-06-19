@@ -1172,8 +1172,15 @@ class SparseMetadataBuilder:
         )
         token_table = req_to_sparse_token[forward_batch.req_pool_indices]
 
-        token_nums = base_metadata.cu_seqlens_k[1:] - base_metadata.cu_seqlens_k[:-1]
-        input_lens = base_metadata.cu_seqlens_q[1:] - base_metadata.cu_seqlens_q[:-1]
+        # CUDA graph replay uses metadata buffers sized for the captured batch,
+        # while ``forward_batch`` contains only the real (unpadded) requests.
+        # Restrict the cumulative sequence-length views to the real batch so
+        # all per-request compression metadata has exactly ``bs`` entries.
+        token_nums = (
+            base_metadata.cu_seqlens_k[1 : bs + 1]
+            - base_metadata.cu_seqlens_k[:bs]
+        )
+        input_lens = cu_seqlens_q[1 : bs + 1] - cu_seqlens_q[:bs]
         history_lens = token_nums - input_lens
 
         history_compress_token_nums = torch.maximum(
