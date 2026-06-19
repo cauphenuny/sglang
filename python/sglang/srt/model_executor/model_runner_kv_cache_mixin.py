@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from sglang.srt.configs.linear_attn_model_registry import import_backend_class
 from sglang.srt.configs.model_config import (
     get_dsa_index_head_dim,
     get_minimax_sparse_attention_config,
@@ -573,6 +574,18 @@ class ModelRunnerKVCacheMixin:
                         enable_memory_saver=self.server_args.enable_memory_saver,
                         pre_alloc_size=pre_alloc_size,
                     )
+            elif (
+                spec := self.linear_attn_model_spec
+            ) is not None and spec.req_to_token_pool_factory_name is not None:
+                factory = import_backend_class(spec.req_to_token_pool_factory_name)
+                self.req_to_token_pool = factory(
+                    runner=self,
+                    size=max_num_reqs,
+                    max_context_len=(
+                        self.model_config.context_len + extra_max_context_len
+                    ),
+                    enable_memory_saver=self.server_args.enable_memory_saver,
+                )
             elif config := self.mambaish_config:
                 self.req_to_token_pool = HybridReqToTokenPool(
                     size=max_num_reqs,

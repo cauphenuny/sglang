@@ -332,6 +332,7 @@ class Flags(_StaticFlags):
     page_size: int | None = None
     quantization: str | None = None
     disable_overlap_schedule: bool = False
+    disable_radix_cache: bool = False
     uses_mamba_radix_cache: bool = False
     mamba_radix_cache_strategy: str = "auto"
     speculative_moe_runner_backend: str | None = None
