@@ -160,6 +160,8 @@ def build_replay_fb_view(
         out_cache_loc=getattr(forward_batch, "out_cache_loc", None),
         out_cache_loc_dsv4=getattr(forward_batch, "out_cache_loc_dsv4", None),
         spec_info=forward_batch.spec_info,
+        # Live batch side channel for MiniCPM CUDA graph replay metadata.
+        _source_forward_batch=forward_batch,
     )
 
 
