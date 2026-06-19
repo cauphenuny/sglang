@@ -531,6 +531,10 @@ class MambaRadixCache(KVCacheEventMixin, BasePrefixCache):
             ]
             self.token_to_kv_pool_allocator.free(kv_indices)
             self.req_to_token_pool.free_mamba_cache(req)
+            if aux_pool := getattr(self.req_to_token_pool, "aux_pool", None):
+                aux_pool.free_token_indices(
+                    req, self.token_to_kv_pool_allocator, kv_committed_len
+                )
             return
 
         token_ids = (req.origin_input_ids + req.output_ids)[:kv_committed_len]
@@ -620,6 +624,11 @@ class MambaRadixCache(KVCacheEventMixin, BasePrefixCache):
             self.token_to_kv_pool_allocator.free(kv_indices[req.cache_protected_len :])
             mamba_exist = True
 
+        if aux_pool := getattr(self.req_to_token_pool, "aux_pool", None):
+            aux_pool.free_token_indices(
+                req, self.token_to_kv_pool_allocator, kv_committed_len
+            )
+
         if mamba_exist:
             mamba_ping_pong_track_buffer_to_keep = None
 
@@ -639,6 +648,13 @@ class MambaRadixCache(KVCacheEventMixin, BasePrefixCache):
 
         self.dec_lock_ref(req.last_node)
 
+    def _set_unfinished_req_prefix_indices(
+        self, req: Req, prefix_indices: torch.Tensor
+    ) -> None:
+        req.prefix_indices = prefix_indices
+        if aux_pool := getattr(self.req_to_token_pool, "aux_pool", None):
+            aux_pool.set_prefix_indices(req, len(prefix_indices))
+
     def cache_unfinished_req(self, req: Req, chunked=False) -> None:
         """Cache request when it is unfinished."""
 
@@ -648,7 +664,9 @@ class MambaRadixCache(KVCacheEventMixin, BasePrefixCache):
             ]
 
             # `req.prefix_indices` will be used in `PrefillAdder::add_chunked_req` later
-            req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
+            self._set_unfinished_req_prefix_indices(
+                req, kv_indices.to(dtype=torch.int64, copy=True)
+            )
             return
 
         token_ids = req.get_fill_ids()
@@ -753,8 +771,9 @@ class MambaRadixCache(KVCacheEventMixin, BasePrefixCache):
 
         # `req.prefix_indices` will be used in `PrefillAdder::add_chunked_req` later
         # NOTE: this is needed for both page_size == 1 and page_size > 1
-        req.prefix_indices = torch.cat(
-            [new_indices, kv_indices_orig[len(new_indices) :]]
+        self._set_unfinished_req_prefix_indices(
+            req,
+            torch.cat([new_indices, kv_indices_orig[len(new_indices) :]]),
         )
         req.cache_protected_len = len(new_indices)
         req.mamba_last_track_seqlen = None

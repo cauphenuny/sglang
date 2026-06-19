@@ -186,6 +186,8 @@ ATTENTION_BACKEND_CHOICES = [
     "tokenspeed_mla",
     "trtllm_mha",
     "dual_chunk_flash_attn",
+    "minicpm_flashattn",
+    "minicpm_flashinfer",
     # AMD specific
     "aiter",
     "wave",
@@ -1444,6 +1446,22 @@ class ServerArgs:
     disable_cuda_graph_padding: A[
         bool,
         "Disable cuda graph when padding is needed. Still uses cuda graph when padding is not needed.",
+    ] = False
+    minicpm_fuse_topk: A[
+        bool,
+        "Fuse stage1, maxpool, and top-k in MiniCPM into a single kernel.",
+    ] = False
+    minicpm_split_stage1: A[
+        bool,
+        "Split MiniCPM stage1 into bmm, softmax, and reduce_sum.",
+    ] = False
+    minicpm_dense_as_sparse: A[
+        bool,
+        "Treat dense batches as sparse in MiniCPM.",
+    ] = False
+    minicpm_force_dense: A[
+        bool,
+        "Force dense attention in MiniCPM.",
     ] = False
     enable_profile_cuda_graph: A[bool, "Enable profiling of cuda graph capture."] = (
         False
@@ -4204,6 +4222,13 @@ class ServerArgs:
 
         # Qwen3VL aiter unified-attention page_size moved to the override registry
         # (arg_groups/overrides.py: _qwen3vl_overrides).
+
+        elif model_arch in ["MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"]:
+            if self.minicpm_force_dense:
+                if self.attention_backend == "minicpm_flashattn":
+                    self.attention_backend = "fa3"
+                elif self.attention_backend == "minicpm_flashinfer":
+                    self.attention_backend = "flashinfer"
 
         # Hybrid-mamba radix cache handling for the per-arch branch call sites
         # dissolved above: the resolution pass self-guards on the arch union

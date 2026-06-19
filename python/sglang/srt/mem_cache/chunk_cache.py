@@ -83,6 +83,10 @@ class ChunkCache(BasePrefixCache):
             req.req_pool_idx, :kv_committed_len
         ]
         self.token_to_kv_pool_allocator.free(kv_indices)
+        if aux_pool := getattr(self.req_to_token_pool, "aux_pool", None):
+            aux_pool.free_token_indices(
+                req, self.token_to_kv_pool_allocator, kv_committed_len
+            )
 
     def cache_unfinished_req(self, req: Req, chunked=False):
         kv_indices = self.req_to_token_pool.req_to_token[
@@ -90,6 +94,8 @@ class ChunkCache(BasePrefixCache):
         ]
         # `req.prefix_indices` will be used in `PrefillAdder::add_chunked_req` later
         req.prefix_indices = kv_indices.to(dtype=torch.int64, copy=True)
+        if aux_pool := getattr(self.req_to_token_pool, "aux_pool", None):
+            aux_pool.set_prefix_indices(req, req.extend_range.end)
 
     def evict(self, params: EvictParams) -> EvictResult:
         return EvictResult()

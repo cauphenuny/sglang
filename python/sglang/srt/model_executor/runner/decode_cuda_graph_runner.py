@@ -167,6 +167,8 @@ def build_replay_fb_view(
         # when mamba-track is disabled.
         mamba_track_indices=getattr(buffers, "mamba_track_indices", None),
         spec_info=forward_batch.spec_info,
+        # Live batch side channel for MiniCPM CUDA graph replay metadata.
+        _source_forward_batch=forward_batch,
     )
 
 
