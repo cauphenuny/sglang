@@ -49,6 +49,10 @@ MAMBA_STATE_PER_REQ_NO_CACHE = 1
 logger = logging.getLogger(__name__)
 
 
+def _token_num_sum(token_nums: torch.Tensor) -> int:
+    return int(token_nums.sum().item()) if token_nums.numel() else 0
+
+
 def kv_to_page_indices(kv_indices: np.ndarray, page_size: int):
     # The page is guaranteed to be full except the last page.
     if page_size == 1:
@@ -468,7 +472,6 @@ def alloc_for_extend(
     batch.maybe_evict_swa()
 
     prefix_tensors = [r.prefix_indices for r in batch.reqs]
-
     # Create tensors for allocation
     prefix_lens_cpu = torch.tensor(batch.prefix_lens, dtype=torch.int64)
     extend_lens_cpu = torch.tensor(batch.extend_lens, dtype=torch.int64)
@@ -482,8 +485,20 @@ def alloc_for_extend(
     req_pool_indices_cpu = torch.tensor(req_pool_indices, dtype=torch.int64)
     req_pool_indices_device = req_pool_indices_cpu.to(batch.device, non_blocking=True)
 
+    aux_pool = getattr(batch.req_to_token_pool, "aux_pool", None)
+    aux_token_nums = (
+        aux_pool.token_nums_for_extend(batch.seq_lens_cpu, prefix_lens_cpu)
+        if aux_pool is not None
+        else {}
+    )
+
+    aux_locs = {}
     # Allocate KV cache (throws exception on failure)
     if _alloc_page_size(batch) == 1:
+        for name, token_nums in aux_token_nums.items():
+            token_sum = _token_num_sum(token_nums)
+            if token_sum > 0:
+                aux_locs[name] = alloc_token_slots(batch.tree_cache, token_sum)
         out_cache_loc = alloc_token_slots(batch.tree_cache, batch.extend_num_tokens)
     else:
         # Since tree_cache.page_size is (page_size * dcp_world_size), for dcp
@@ -520,6 +535,14 @@ def alloc_for_extend(
         prefix_tensors,
         batch.req_to_token_pool,
     )
+    if aux_pool is not None:
+        aux_pool.write_extend_indices(
+            req_pool_indices_cpu,
+            prefix_lens_cpu,
+            aux_token_nums,
+            aux_locs,
+            batch.reqs,
+        )
 
     # DSV4-NPU hook: write c4/c128/swa per-req tables from the stashed bundle.
     # No-op on non-DSV4 paths (out_cache_loc_dsv4 stays None there).
@@ -599,10 +622,21 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> torch.Tensor:
 
     seq_lens_gpu = batch.seq_lens
     bs = seq_lens_gpu.shape[0]
+    aux_pool = getattr(batch.req_to_token_pool, "aux_pool", None)
+    aux_token_nums = (
+        aux_pool.token_nums_for_decode(batch.seq_lens_cpu, token_per_req)
+        if aux_pool is not None
+        else {}
+    )
 
+    aux_locs = {}
     if _alloc_page_size(batch) == 1:
         # Non-paged allocation
         out_cache_loc = alloc_token_slots(batch.tree_cache, bs * token_per_req)
+        for name, token_nums in aux_token_nums.items():
+            token_sum = _token_num_sum(token_nums)
+            if token_sum > 0:
+                aux_locs[name] = alloc_token_slots(batch.tree_cache, token_sum)
     else:
         # Paged allocation
         last_loc = batch.req_to_token_pool.req_to_token[
@@ -637,6 +671,14 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> torch.Tensor:
             batch,
             batch.seq_lens_cpu + token_per_req,
             token_per_req,
+        )
+
+    if aux_pool is not None:
+        aux_pool.write_decode_indices(
+            batch.req_pool_indices,
+            batch.seq_lens_cpu,
+            aux_token_nums,
+            aux_locs,
         )
 
     return out_cache_loc
