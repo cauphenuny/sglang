@@ -69,7 +69,7 @@ bash install_minicpm_sala.sh https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simpl
 1. 创建 `sglang_minicpm_sala_env` 虚拟环境（Python 3.12）
 2. 安装 MiniCPM-SALA (当前仓库)
 3. 从源码编译安装 `sgl-kernel`（内置 InfLLM v2 kernels）
-4. 安装 `tilelang` 和 `flash-linear-attention`
+4. 安装 `tilelang`
 
 ### 使用
 
@@ -194,11 +194,7 @@ uv pip install -e ./python[all]
 cd sgl-kernel && make build && cd ..
 
 # 4. 安装额外依赖
-uv pip install tilelang flash-linear-attention
-# flash-linear-attention 会把 kernels 升到 >=0.15，其 LayerRepository 要求显式指定
-# revision/version，会导致 `import sglang`（经 transformers hub_kernels）报错。
-# 暂时回退到兼容版本，待上游修复后可移除。
-uv pip install "kernels<0.15"
+uv pip install tilelang
 ```
 
 > **提示（查看编译进度）：** `make build` 默认只显示一个 uv 转圈，看不到逐文件进度。

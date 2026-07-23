@@ -282,7 +282,11 @@ class TestGoldenModelOverrides(_IsolatedPublish):
 
     @staticmethod
     def _minicpm_overrides(
-        architecture, *, sparse_attention=False, attention_backend=None
+        architecture,
+        *,
+        sparse_attention=False,
+        lightning_attention=False,
+        attention_backend=None,
     ):
         args = SimpleNamespace(
             attention_backend=attention_backend,
@@ -302,6 +306,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
             args,
             hf_config=SimpleNamespace(
                 has_minicpm_sparse_attention=sparse_attention,
+                has_lightning_layers=lightning_attention,
             ),
         )
         return {
@@ -310,11 +315,22 @@ class TestGoldenModelOverrides(_IsolatedPublish):
             for field, value in declaration.items()
         }
 
-    def test_minicpm_requires_radix_cache_disabled(self):
+    def test_minicpm_disables_radix_cache_only_for_hybrid_layers(self):
         for architecture in ("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"):
             with self.subTest(architecture=architecture):
+                self.assertNotIn(
+                    "disable_radix_cache",
+                    self._minicpm_overrides(architecture),
+                )
                 self.assertTrue(
-                    self._minicpm_overrides(architecture)["disable_radix_cache"]
+                    self._minicpm_overrides(architecture, sparse_attention=True)[
+                        "disable_radix_cache"
+                    ]
+                )
+                self.assertTrue(
+                    self._minicpm_overrides(architecture, lightning_attention=True)[
+                        "disable_radix_cache"
+                    ]
                 )
 
     def test_sparse_minicpm_defaults_to_sparse_attention_backend(self):

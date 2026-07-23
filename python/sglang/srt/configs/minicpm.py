@@ -49,6 +49,11 @@ class MiniCPMHybridConfig(PretrainedConfig):
         lightning_head_dim=64,
         lightning_scale="1/sqrt(d)",
         lightning_layerwise_decay=False,
+        lightning_use_rope=True,
+        use_output_gate=False,
+        attention_bias=False,
+        use_output_norm=False,
+        qk_norm=True,
         attn_use_rope=True,
         attn_use_output_gate=False,
         # Sparse attention config fields
@@ -88,6 +93,11 @@ class MiniCPMHybridConfig(PretrainedConfig):
         self.lightning_head_dim = lightning_head_dim
         self.lightning_scale = lightning_scale
         self.lightning_layerwise_decay = lightning_layerwise_decay
+        self.lightning_use_rope = lightning_use_rope
+        self.use_output_gate = use_output_gate
+        self.attention_bias = attention_bias
+        self.use_output_norm = use_output_norm
+        self.qk_norm = qk_norm
         self.attn_use_rope = attn_use_rope
         self.attn_use_output_gate = attn_use_output_gate
         # Sparse attention config fields

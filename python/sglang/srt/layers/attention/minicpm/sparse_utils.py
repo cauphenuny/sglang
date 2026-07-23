@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+import msgspec
 import torch
 import torch.nn.functional as F
 
@@ -144,141 +144,50 @@ def get_compress_k_v2(
     full_compressed_k1,
     full_compressed_k2,
     max_context_length,
+    k1_kernel_size,
+    k1_kernel_stride,
+    k2_kernel_size,
+    k2_kernel_stride,
+    padded=False,
 ):
     batch = len(forward_batch.req_pool_indices)
-
-    # k1 stride is 16, window is 32
-    # k2 stride is 64, windiw is 128
-    k1_stride = 16
-    k1_l = 32
-    k2_stride = 64
-    k2_l = 128
-
-    #################### prepare arguments ##############################
-    # TODO in summary, the arguments needed are:
-    # key_cache [-1, head_num, head_size]
-    # metadata.cu_seqlens_q [batch_size + 1]
-    # metadata.cu_seqlens_k [batch_size + 1]
-    # token_table [batch_size, token_num]: the pre-allocated locs of normal tokens
-    # k1_table [batch_size, total_compress_k1_token_num]: the pre-allocated locs of compress k1 tokens
-    # k2_table [batch_size, total_compress_k2_token_num]: the pre-allocated locs of compress k2 tokens
-    # these arguments should be directly passed in
-
-    # get key cache ptr, zero over head
     key_cache = get_token_to_kv_pool().get_key_buffer(layer.layer_id)
     key_cache = key_cache.view(-1, layer.tp_k_head_num, layer.head_dim)
 
-    ##################### prepare of computation ######################
-
-    # deal with k1
-    compress_k_core_new(
-        full_compressed_k1,
-        layer,
-        batch,
-        k1_stride,
-        key_cache,
-        metadata.page_table,
-        metadata.k1.table,
-        metadata.k1.new_token_nums,
-        metadata.k1.cu_new_token_nums,
-        metadata.k1.history_compress_token_nums,
-        metadata.k1.cu_new_compress_token_nums,
-        metadata.k1.new_compress_token_nums,
-        metadata.k1.total_compress_token_nums,
-        metadata.k1.cu_total_compress_token_nums,
-        k1_l,
-        k1_stride,
-        max_context_length,
-    )
-
-    # deal with k2
-    compress_k_core_new(
-        full_compressed_k2,
-        layer,
-        batch,
-        k2_stride,
-        key_cache,
-        metadata.page_table,
-        metadata.k2.table,
-        metadata.k2.new_token_nums,
-        metadata.k2.cu_new_token_nums,
-        metadata.k2.history_compress_token_nums,
-        metadata.k2.cu_new_compress_token_nums,
-        metadata.k2.new_compress_token_nums,
-        metadata.k2.total_compress_token_nums,
-        metadata.k2.cu_total_compress_token_nums,
-        k2_l,
-        k2_stride,
-        max_context_length,
-    )
-
-    return
-
-
-def get_compress_k_v2_padded(
-    layer,
-    forward_batch,
-    metadata: FlashAttentionMetadata,
-    full_compressed_k1,
-    full_compressed_k2,
-    max_context_length,
-):
-    """Padded layout version for debugging with reshape()."""
-    batch = len(forward_batch.req_pool_indices)
-
-    k1_stride = 16
-    k1_l = 32
-    k2_stride = 64
-    k2_l = 128
-
-    key_cache = get_token_to_kv_pool().get_key_buffer(layer.layer_id)
-    key_cache = key_cache.view(-1, layer.tp_k_head_num, layer.head_dim)
-
-    # deal with k1
-    compress_k_core_new(
-        full_compressed_k1,
-        layer,
-        batch,
-        k1_stride,
-        key_cache,
-        metadata.page_table,
-        metadata.k1.table,
-        metadata.k1.new_token_nums,
-        metadata.k1.cu_new_token_nums,
-        metadata.k1.history_compress_token_nums,
-        metadata.k1.cu_new_compress_token_nums,
-        metadata.k1.new_compress_token_nums,
-        metadata.k1.total_compress_token_nums,
-        metadata.k1.cu_total_compress_token_nums,
-        k1_l,
-        k1_stride,
-        max_context_length,
-        padded=True,
-    )
-
-    # deal with k2
-    compress_k_core_new(
-        full_compressed_k2,
-        layer,
-        batch,
-        k2_stride,
-        key_cache,
-        metadata.page_table,
-        metadata.k2.table,
-        metadata.k2.new_token_nums,
-        metadata.k2.cu_new_token_nums,
-        metadata.k2.history_compress_token_nums,
-        metadata.k2.cu_new_compress_token_nums,
-        metadata.k2.new_compress_token_nums,
-        metadata.k2.total_compress_token_nums,
-        metadata.k2.cu_total_compress_token_nums,
-        k2_l,
-        k2_stride,
-        max_context_length,
-        padded=True,
-    )
-
-    return
+    for full_compressed_k, level, kernel_size, kernel_stride in (
+        (
+            full_compressed_k1,
+            metadata.k1,
+            k1_kernel_size,
+            k1_kernel_stride,
+        ),
+        (
+            full_compressed_k2,
+            metadata.k2,
+            k2_kernel_size,
+            k2_kernel_stride,
+        ),
+    ):
+        compress_k_core_new(
+            full_compressed_k,
+            layer,
+            batch,
+            kernel_stride,
+            key_cache,
+            metadata.page_table,
+            level.table,
+            level.new_token_nums,
+            level.cu_new_token_nums,
+            level.history_compress_token_nums,
+            level.cu_new_compress_token_nums,
+            level.new_compress_token_nums,
+            level.total_compress_token_nums,
+            level.cu_total_compress_token_nums,
+            kernel_size,
+            kernel_stride,
+            max_context_length,
+            padded=padded,
+        )
 
 
 def allocate_and_compress_keys(
@@ -287,6 +196,10 @@ def allocate_and_compress_keys(
     metadata: FlashAttentionMetadata,
     k1_token_nums: int,
     k2_token_nums: int,
+    k1_kernel_size: int,
+    k1_kernel_stride: int,
+    k2_kernel_size: int,
+    k2_kernel_stride: int,
     dtype: torch.dtype = torch.bfloat16,
     device: torch.device = None,
     max_context_length: int = 32768,
@@ -300,6 +213,10 @@ def allocate_and_compress_keys(
         metadata: FlashAttention metadata
         k1_token_nums: Number of k1 tokens to allocate
         k2_token_nums: Number of k2 tokens to allocate
+        k1_kernel_size: K1 compression window
+        k1_kernel_stride: K1 compression stride
+        k2_kernel_size: K2 compression window
+        k2_kernel_stride: K2 compression stride
         dtype: Tensor data type (default: bfloat16)
         device: Tensor device (default: layer device)
         max_context_length: Maximum context length for the model (default: 32768)
@@ -324,24 +241,19 @@ def allocate_and_compress_keys(
         fill_value=float("-inf"),
     )
 
-    if minicpm_split_stage1:
-        get_compress_k_v2_padded(
-            layer,
-            forward_batch,
-            metadata,
-            full_compressed_k1,
-            full_compressed_k2,
-            max_context_length=max_context_length,
-        )
-    else:
-        get_compress_k_v2(
-            layer,
-            forward_batch,
-            metadata,
-            full_compressed_k1,
-            full_compressed_k2,
-            max_context_length=max_context_length,
-        )
+    get_compress_k_v2(
+        layer,
+        forward_batch,
+        metadata,
+        full_compressed_k1,
+        full_compressed_k2,
+        max_context_length=max_context_length,
+        k1_kernel_size=k1_kernel_size,
+        k1_kernel_stride=k1_kernel_stride,
+        k2_kernel_size=k2_kernel_size,
+        k2_kernel_stride=k2_kernel_stride,
+        padded=minicpm_split_stage1,
+    )
 
     return full_compressed_k1, full_compressed_k2
 
@@ -647,11 +559,10 @@ def compressed_attention_tilelang(
         return topk_idx
 
 
-@dataclass
-class CompressionLevelMetadata:
+class CompressionLevelMetadata(msgspec.Struct):
     """Metadata for a single compression level (k1 or k2).
 
-    This dataclass groups all metadata fields for one compression level,
+    This struct groups all metadata fields for one compression level,
     reducing duplication and making the code more maintainable.
     """
 
@@ -672,11 +583,10 @@ class CompressionLevelMetadata:
     cu_total_compress_token_nums: Optional[torch.Tensor] = None
 
 
-@dataclass
-class SparseConfig:
+class SparseConfig(msgspec.Struct):
     """Configuration for sparse attention in MiniCPM models.
 
-    This dataclass stores all sparse attention configuration parameters,
+    This struct stores all sparse attention configuration parameters,
     including kernel sizes, block sizes, top-K selection, and model
     architecture parameters.
 
@@ -1445,7 +1355,6 @@ __all__ = [
     "SparseMetadataBuilder",
     "batched_gather",
     "get_compress_k_v2",
-    "get_compress_k_v2_padded",
     "allocate_and_compress_keys",
     "compressed_attention",
 ]

@@ -112,11 +112,7 @@ make build
 
 # Install additional libraries
 echo "[4/4] Installing additional libraries..."
-uv pip install tilelang flash-linear-attention
-# flash-linear-attention pulls in kernels>=0.15, whose LayerRepository requires an
-# explicit revision/version and breaks `import sglang` (via transformers hub_kernels).
-# Pin back to a compatible release until upstream is fixed.
-uv pip install "kernels<0.15"
+uv pip install tilelang
 
 # ---- Done ----
 echo ""
