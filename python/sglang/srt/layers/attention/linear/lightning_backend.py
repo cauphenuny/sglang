@@ -70,14 +70,27 @@ class LightningAttentionBackend(MambaAttnBackendBase):
             if hasattr(model_runner.model_config, "block")
             else 256
         )
-        total_num_heads = model_runner.model_config.hf_config.num_attention_heads
-        num_hidden_layers = model_runner.model_config.hf_config.num_hidden_layers
+        config = model_runner.model_config.hf_config
+        total_num_heads = (
+            getattr(config, "lightning_nkv", None) or config.num_attention_heads
+        )
+        assert total_num_heads % get_parallel().attn_tp_size == 0
+        num_hidden_layers = config.num_hidden_layers
         self.tp_slope = LightningAttentionBackend._build_slope_tensor(
-            total_num_heads, num_hidden_layers, self.device
+            total_num_heads,
+            num_hidden_layers,
+            self.device,
+            layerwise_decay=getattr(config, "lightning_layerwise_decay", True),
         )
-        self.linear_backend = getattr(
-            model_runner.model_config.hf_config, "linear_backend", "seg_la"
+        head_dim = getattr(
+            config, "lightning_head_dim", model_runner.model_config.head_dim
         )
+        scale = getattr(config, "lightning_scale", "1/sqrt(d)")
+        self.softmax_scale = {
+            "1/sqrt(d)": head_dim**-0.5,
+            "1/d": head_dim**-1.0,
+        }.get(scale, float(scale) if isinstance(scale, (int, float)) else 1.0)
+        self.linear_backend = getattr(config, "linear_backend", "seg_la")
         logger.info(
             f"linear_backend for linear attention in hybrid_linear_backend: {self.linear_backend}"
         )
@@ -114,7 +127,10 @@ class LightningAttentionBackend(MambaAttnBackendBase):
 
     @staticmethod
     def _build_slope_tensor(
-        n_attention_heads: int, num_hidden_layers: int, device="cuda"
+        n_attention_heads: int,
+        num_hidden_layers: int,
+        device="cuda",
+        layerwise_decay: bool = True,
     ):
         def get_slopes(n):
             def get_slopes_power_of_2(n):
@@ -137,7 +153,9 @@ class LightningAttentionBackend(MambaAttnBackendBase):
 
         tp_heads = n_attention_heads // get_parallel().attn_tp_size
         tp_rank = get_parallel().attn_tp_rank
-        if num_hidden_layers <= 1:
+        if not layerwise_decay:
+            slope_rate_list = [slopes] * num_hidden_layers
+        elif num_hidden_layers <= 1:
             slope_rate_list = [slopes * (1 + 1e-5)]
         else:
             slope_rate_list = [
@@ -265,6 +283,7 @@ class LightningAttentionBackend(MambaAttnBackendBase):
             meta=seg_meta,
             caches=temp_cache,
             cache_indices=intermediate_state_indices,
+            softmax_scale=self.softmax_scale,
             decouple=True,
         )
         return hidden

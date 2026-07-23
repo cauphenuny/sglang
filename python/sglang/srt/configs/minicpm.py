@@ -1,51 +1,11 @@
-from dataclasses import dataclass, field
-
-import numpy as np
 from transformers import PretrainedConfig
 
 from sglang.srt.configs.linear_attn_model_registry import (
     LinearAttnModelSpec,
     register_linear_attn_model,
 )
-from sglang.srt.configs.mamba_utils import BaseLinearStateParams
-from sglang.srt.distributed.utils import divide
+from sglang.srt.configs.mamba_utils import Mamba2CacheParams, Mamba2StateShape
 from sglang.srt.runtime_context import get_parallel
-
-
-@dataclass(kw_only=True, frozen=True)
-class SimpleGLAStateShape:
-    conv: list[tuple[int, int]] = field(default_factory=list)
-    temporal: tuple[int, int, int]
-
-    num_heads: int
-    head_dim: int
-    state_size: int
-
-    @staticmethod
-    def create(
-        *,
-        tp_world_size: int,
-        num_heads: int,
-        head_dim: int,
-        state_size: int,
-    ) -> "SimpleGLAStateShape":
-        temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
-        return SimpleGLAStateShape(
-            temporal=temporal_state_shape,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            state_size=state_size,
-        )
-
-
-@dataclass(kw_only=True, frozen=True)
-class SimpleGLACacheParams(BaseLinearStateParams):
-    shape: SimpleGLAStateShape
-
-    @property
-    def mamba_cache_per_req(self) -> int:
-        ssm_numel = int(np.prod(self.shape.temporal))
-        return ssm_numel * self.dtype.temporal.itemsize * len(self.layers)
 
 
 class MiniCPMHybridConfig(PretrainedConfig):
@@ -88,6 +48,7 @@ class MiniCPMHybridConfig(PretrainedConfig):
         lightning_nkv=16,
         lightning_head_dim=64,
         lightning_scale="1/sqrt(d)",
+        lightning_layerwise_decay=False,
         attn_use_rope=True,
         attn_use_output_gate=False,
         # Sparse attention config fields
@@ -126,6 +87,7 @@ class MiniCPMHybridConfig(PretrainedConfig):
         self.lightning_nkv = lightning_nkv
         self.lightning_head_dim = lightning_head_dim
         self.lightning_scale = lightning_scale
+        self.lightning_layerwise_decay = lightning_layerwise_decay
         self.attn_use_rope = attn_use_rope
         self.attn_use_output_gate = attn_use_output_gate
         # Sparse attention config fields
@@ -171,7 +133,7 @@ class MiniCPMHybridConfig(PretrainedConfig):
 
     @property
     def mamba2_cache_params(self):
-        """Return Simple GLA cache parameters for lightning attention layers."""
+        """Return linear-attention cache parameters for lightning layers."""
         if self.mixer_types is None:
             lightning_layer_ids = []
         else:
@@ -188,14 +150,17 @@ class MiniCPMHybridConfig(PretrainedConfig):
         ):
             return None
 
-        shape = SimpleGLAStateShape.create(
+        shape = Mamba2StateShape.create(
             tp_world_size=get_parallel().attn_tp_size,
+            intermediate_size=0,
+            n_groups=0,
             num_heads=self.lightning_nkv,
             head_dim=self.lightning_head_dim,
             state_size=self.lightning_head_dim,
+            conv_kernel=1,
         )
 
-        return SimpleGLACacheParams(shape=shape, layers=lightning_layer_ids)
+        return Mamba2CacheParams(shape=shape, layers=lightning_layer_ids)
 
     @property
     def full_attention_layer_ids(self):
@@ -252,7 +217,7 @@ register_linear_attn_model(
     LinearAttnModelSpec(
         config_class=MiniCPMHybridConfig,
         backend_class_name=(
-            "sglang.srt.layers.attention.minicpm.simple_gla.SimpleGLAAttnBackend"
+            "sglang.srt.layers.attention.linear.lightning_backend.LightningAttentionBackend"
         ),
         arch_names=["MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"],
         uses_mamba_radix_cache=True,

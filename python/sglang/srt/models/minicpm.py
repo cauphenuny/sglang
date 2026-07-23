@@ -38,7 +38,6 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.model_executor.forward_context import get_attn_backend
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import add_prefix
@@ -71,8 +70,7 @@ class MiniCPMMLP(nn.Module):
         )
         if hidden_act != "silu":
             raise ValueError(
-                f"Unsupported activation: {hidden_act}. "
-                "Only silu is supported for now."
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
 
@@ -195,11 +193,11 @@ class MiniCPMAttention(nn.Module):
 
 
 class MiniCPMLightningMixer(nn.Module):
-    """Lightning attention mixer that uses SimpleGLAAttnBackend.
+    """Lightning attention mixer backed by the shared linear-attention backend.
 
     This is a wrapper that prepares inputs for the backend and handles
     the QKV projection, normalization, RoPE, and output processing,
-    while delegating the Simple GLA kernel calls to SimpleGLAAttnBackend.
+    while delegating the recurrent computation through RadixAttention.
     """
 
     def __init__(
@@ -301,6 +299,15 @@ class MiniCPMLightningMixer(nn.Module):
                 rope_scaling=rope_scaling,
             )
 
+        self.attn = RadixAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            num_kv_heads=self.num_kv_heads,
+            layer_id=layer_id,
+            quant_config=quant_config,
+            prefix=add_prefix("attn", prefix),
+        )
         self.layer_id = layer_id
         self.state_shape = (self.num_kv_heads, self.head_dim, self.head_dim)
 
@@ -329,33 +336,7 @@ class MiniCPMLightningMixer(nn.Module):
         k = k.reshape(-1, self.num_kv_heads, self.head_dim)
         v = v.reshape(-1, self.num_kv_heads, self.head_dim)
 
-        q = q.unsqueeze(0)
-        k = k.unsqueeze(0)
-        v = v.unsqueeze(0)
-
-        from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
-            HybridLinearAttnBackend,
-        )
-
-        attn_backend = get_attn_backend()
-        if not isinstance(attn_backend, HybridLinearAttnBackend):
-            raise RuntimeError(
-                "SimpleGLAAttnBackend requires HybridLinearAttnBackend but got "
-                f"{type(attn_backend).__name__}. This mixer should only be used for "
-                "MiniCPM hybrid models."
-            )
-
-        linear_attn_backend = attn_backend.linear_attn_backend
-        o = linear_attn_backend.forward(
-            q=q,
-            k=k,
-            v=v,
-            forward_batch=forward_batch,
-            layer_id=self.layer_id,
-            output_attentions=False,
-        )
-
-        o = o.reshape(-1, self.num_heads * self.head_dim)
+        o = self.attn(q, k, v, forward_batch)
 
         if self.use_output_norm:
             o = self.o_norm(o)
@@ -410,9 +391,9 @@ class MiniCPMDecoderLayer(nn.Module):
                 prefix=add_prefix("self_attn", prefix),
             )
         elif self.mixer_type in ["lightning", "lightning_attn", "lightning-attn"]:
-            assert (
-                config.head_dim is not False
-            ), "head_dim must be provided for LightningAttention"
+            assert config.head_dim is not False, (
+                "head_dim must be provided for LightningAttention"
+            )
             self.self_attn = MiniCPMLightningMixer(
                 hidden_size=self.hidden_size,
                 num_heads=config.lightning_nh,
