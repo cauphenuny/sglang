@@ -108,6 +108,7 @@ SGLANG_MINICPM_DENSE_AS_SPARSE=1 python3 -m sglang.launch_server \
 |------|------|
 | `SGLANG_MINICPM_FUSE_TOPK=1` | 融合 stage1、maxpool 和 top-k |
 | `SGLANG_MINICPM_SPLIT_STAGE1=1` | 拆分 stage1 的 bmm、softmax 和 reduce |
+| `SGLANG_MINICPM_FORCE_DENSE=1` | 强制使用普通 dense attention backend，并跳过 K1/K2 压缩 cache |
 
 > **提示：** 为获得最佳生成效果，建议在请求时设置 `temperature=0.9`。
 

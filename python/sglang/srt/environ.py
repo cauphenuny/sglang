@@ -694,6 +694,7 @@ class Envs:
     SGLANG_MINICPM_FUSE_TOPK = EnvBool(False)
     SGLANG_MINICPM_SPLIT_STAGE1 = EnvBool(False)
     SGLANG_MINICPM_DENSE_AS_SPARSE = EnvBool(False)
+    SGLANG_MINICPM_FORCE_DENSE = EnvBool(False)
 
     # sgl-kernel
     SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK = EnvBool(False)

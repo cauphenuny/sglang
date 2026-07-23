@@ -182,7 +182,10 @@ def create_req_to_token_pool(
     enable_memory_saver: bool,
 ):
     config = configurator.model_config.hf_config
-    sparse = config.has_minicpm_sparse_attention
+    sparse = config.has_minicpm_sparse_attention and (
+        configurator.server_args.attention_backend
+        in ("minicpm_flashattn", "minicpm_flashinfer")
+    )
     cache_params = config.mamba2_cache_params
     extra_max_context_len = max_context_len - configurator.model_config.context_len
     if cache_params is None:

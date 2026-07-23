@@ -757,7 +757,14 @@ def _minicpm_sala_overrides(server_args: Any, hf_config: Any) -> dict:
     overrides: Dict[str, Any] = {}
     if has_hybrid_attention:
         overrides["disable_radix_cache"] = True
-    if has_sparse_attention and server_args.is_attention_backend_not_set():
+    if envs.SGLANG_MINICPM_FORCE_DENSE.get():
+        dense_backend = {
+            "minicpm_flashattn": "fa3",
+            "minicpm_flashinfer": "flashinfer",
+        }.get(server_args.attention_backend)
+        if dense_backend is not None:
+            overrides["attention_backend"] = dense_backend
+    elif has_sparse_attention and server_args.is_attention_backend_not_set():
         overrides["attention_backend"] = (
             "minicpm_flashinfer"
             if is_blackwell_supported()

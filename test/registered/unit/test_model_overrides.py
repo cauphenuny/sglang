@@ -371,6 +371,24 @@ class TestGoldenModelOverrides(_IsolatedPublish):
         )
         self.assertNotIn("attention_backend", overrides)
 
+    def test_minicpm_force_dense_uses_stock_attention_backend(self):
+        with patch.dict(os.environ, {"SGLANG_MINICPM_FORCE_DENSE": "1"}):
+            self.assertNotIn(
+                "attention_backend",
+                self._minicpm_overrides(
+                    "MiniCPMSALAForCausalLM",
+                    sparse_attention=True,
+                ),
+            )
+            self.assertEqual(
+                self._minicpm_overrides(
+                    "MiniCPMSALAForCausalLM",
+                    sparse_attention=True,
+                    attention_backend="minicpm_flashinfer",
+                )["attention_backend"],
+                "flashinfer",
+            )
+
     def _construct(self, arch, model_type, config_extra=None, **server_kwargs):
         from sglang.srt.server_args import ServerArgs
 
