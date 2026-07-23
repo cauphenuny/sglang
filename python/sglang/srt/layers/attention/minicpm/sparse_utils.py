@@ -554,7 +554,7 @@ def compressed_attention_tilelang(
         topk_idx[topk_idx == large_val] = -1
 
         # Truncate to output_topk (same as original: min(topk, num_blocks))
-        topk_idx = topk_idx[:, :, :output_topk]
+        topk_idx = topk_idx[:, :, :output_topk].contiguous()
 
         return topk_idx
 

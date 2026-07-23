@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from sglang.jit_kernel.flash_attention import flash_attn_with_kvcache
+from sglang.kernels.ops.attention.utils import create_flashinfer_kv_indices_triton
 from sglang.srt.configs.minicpm import MiniCPMHybridConfig
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
@@ -16,6 +17,7 @@ from sglang.srt.layers.attention.flashattention_backend import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.runtime_context import get_parallel
+from sglang.srt.utils import is_blackwell_supported, is_flashinfer_available
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -56,6 +58,11 @@ class MiniCPMSparseBackend(AttentionBackend):
         fa_impl_ver=3,
     ):
         super().__init__()
+        attention_backend = model_runner.server_args.attention_backend
+        self.use_flashinfer = attention_backend == "minicpm_flashinfer"
+        use_blackwell_flashinfer = self.use_flashinfer and is_blackwell_supported()
+        if use_blackwell_flashinfer:
+            fa_impl_ver = 4
         self.base_backend = FlashAttentionBackend(
             model_runner,
             skip_prefill=skip_prefill,
@@ -122,7 +129,9 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.k2_kernel_size = self.kernel_size * 4
         self.k2_kernel_stride = self.kernel_stride * 4
 
-        self.minicpm_fuse_topk = envs.SGLANG_MINICPM_FUSE_TOPK.get()
+        self.minicpm_fuse_topk = (
+            use_blackwell_flashinfer or envs.SGLANG_MINICPM_FUSE_TOPK.get()
+        )
         self.minicpm_split_stage1 = envs.SGLANG_MINICPM_SPLIT_STAGE1.get()
 
         max_cache_len = self.max_context_len
@@ -169,10 +178,10 @@ class MiniCPMSparseBackend(AttentionBackend):
             model_runner.server_args.chunked_prefill_size
         )
 
-        if model_runner.server_args.attention_backend != "minicpm_flashattn":
+        if attention_backend not in ("minicpm_flashattn", "minicpm_flashinfer"):
             raise ValueError(
                 "MiniCPM sparse attention requires "
-                "attention_backend='minicpm_flashattn'."
+                "attention_backend='minicpm_flashattn' or 'minicpm_flashinfer'."
             )
 
         # Initialize sparse attention helpers (required for MiniCPM)
@@ -185,6 +194,57 @@ class MiniCPMSparseBackend(AttentionBackend):
             num_kv_heads=self.num_kv_heads,
             max_context_len=self.max_context_len,
         )
+
+        self.flashinfer_backend = None
+        if self.use_flashinfer:
+            if not is_flashinfer_available():
+                raise RuntimeError(
+                    "minicpm_flashinfer requires the flashinfer package."
+                )
+            from sglang.srt.layers.attention.flashinfer_backend import (
+                FlashInferAttnBackend,
+            )
+
+            max_sparse_bs = model_runner.req_to_token_pool.size * 2
+            self.flashinfer_kv_indptr = torch.zeros(
+                max_sparse_bs + 1, dtype=torch.int32, device=self.device
+            )
+            self.flashinfer_kv_indices = torch.zeros(
+                max_sparse_bs * self.num_sparse_topk_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.flashinfer_kv_last_page_len = torch.ones(
+                max_sparse_bs, dtype=torch.int32, device=self.device
+            )
+            self.flashinfer_rows = torch.arange(
+                max_sparse_bs, dtype=torch.int32, device=self.device
+            )
+            self.flashinfer_backend = FlashInferAttnBackend(
+                model_runner,
+                skip_prefill=False,
+                kv_indptr_buf=self.flashinfer_kv_indptr,
+                kv_last_page_len_buf=self.flashinfer_kv_last_page_len,
+            )
+            if self.enable_cuda_graph:
+                self.flashinfer_backend.init_cuda_graph_state(
+                    max_sparse_bs,
+                    max_sparse_bs,
+                    kv_indices_buf=self.flashinfer_kv_indices,
+                )
+            self.flashinfer_decode_graph_wrappers = {}
+            self.flashinfer_active_wrapper = None
+            self.flashinfer_active_kv_indptr = None
+            self.flashinfer_active_kv_indices = None
+            self.flashinfer_active_kv_last_page_len = None
+            self.flashinfer_active_rows = None
+            self.flashinfer_prefill_planned = False
+            self.flashinfer_num_qo_heads = (
+                model_runner.model_config.num_attention_heads // tp_size // 2
+            )
+            self.flashinfer_num_kv_heads = self.num_kv_heads // 2
+            self.flashinfer_q_dtype = model_runner.dtype
+            self.flashinfer_kv_dtype = model_runner.kv_cache_dtype
 
     def _get_fused_topk_kernel(self, batch_size: int, *, is_prefill: bool):
         if not self.minicpm_fuse_topk:
@@ -361,7 +421,136 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.base_backend.init_forward_metadata(forward_batch)
         metadata = self.base_backend.forward_metadata
         self.update_batch_for_sparse(forward_batch, metadata)
+        if self.use_flashinfer:
+            if forward_batch.forward_mode.is_decode_or_idle():
+                self._prepare_flashinfer(metadata, is_prefill=False)
+            else:
+                self.flashinfer_prefill_planned = False
         self.forward_metadata = metadata
+
+    def _prepare_flashinfer(
+        self,
+        metadata: FlashAttentionMetadata,
+        *,
+        is_prefill: bool,
+        graph: bool = False,
+        in_capture: bool = False,
+    ):
+        cache_seqlens = metadata.sparse_cache_seqlens_int32
+        sparse_bs = cache_seqlens.numel()
+        if sparse_bs == 0:
+            self.flashinfer_active_wrapper = None
+            return
+
+        if is_prefill:
+            # Sparse prefill has one page-table row per query token and head
+            # group, while decode has only one row per request and head group.
+            # Keep prefill buffers batch-sized instead of reserving them in the
+            # CUDA-graph state, which only serves decode.
+            kv_indptr = metadata.sparse_cu_seqlens_k
+            kv_indices = torch.empty(
+                metadata.sparse_page_table.numel(),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            kv_last_page_len = (cache_seqlens > 0).to(torch.int32)
+            rows = torch.arange(sparse_bs, dtype=torch.int32, device=self.device)
+            wrapper = self.flashinfer_backend.prefill_wrappers_paged[0]
+            wrapper.begin_forward(
+                metadata.sparse_cu_seqlens_q,
+                kv_indptr,
+                kv_indices,
+                kv_last_page_len,
+                self.flashinfer_num_qo_heads,
+                self.flashinfer_num_kv_heads,
+                self.head_dim,
+                self.page_size,
+                causal=True,
+                q_data_type=self.flashinfer_q_dtype,
+                kv_data_type=self.flashinfer_kv_dtype,
+                non_blocking=True,
+            )
+        else:
+            kv_indptr = self.flashinfer_kv_indptr[: sparse_bs + 1]
+            kv_indptr[0] = 0
+            torch.cumsum(cache_seqlens, dim=0, out=kv_indptr[1:])
+            kv_indices = self.flashinfer_kv_indices[
+                : sparse_bs * self.num_sparse_topk_tokens
+            ]
+            kv_last_page_len = self.flashinfer_kv_last_page_len[:sparse_bs]
+            kv_last_page_len.copy_((cache_seqlens > 0).to(torch.int32))
+            rows = self.flashinfer_rows[:sparse_bs]
+            graph_bs = sparse_bs // 2
+            if graph and in_capture:
+                wrapper = self.flashinfer_backend._create_decode_wrappers(
+                    graph_bs, sparse_bs
+                )[0]
+                self.flashinfer_decode_graph_wrappers[graph_bs] = wrapper
+            elif graph:
+                wrapper = self.flashinfer_decode_graph_wrappers[graph_bs]
+            else:
+                wrapper = self.flashinfer_backend.decode_wrappers[0]
+
+            wrapper.begin_forward(
+                kv_indptr,
+                kv_indices,
+                kv_last_page_len,
+                self.flashinfer_num_qo_heads,
+                self.flashinfer_num_kv_heads,
+                self.head_dim,
+                self.page_size,
+                q_data_type=self.flashinfer_q_dtype,
+                kv_data_type=self.flashinfer_kv_dtype,
+                non_blocking=True,
+            )
+
+        self.flashinfer_active_wrapper = wrapper
+        self.flashinfer_active_kv_indptr = kv_indptr
+        self.flashinfer_active_kv_indices = kv_indices
+        self.flashinfer_active_kv_last_page_len = kv_last_page_len
+        self.flashinfer_active_rows = rows
+
+    def _forward_flashinfer(
+        self,
+        q: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        metadata: FlashAttentionMetadata,
+        layer: RadixAttention,
+        *,
+        is_prefill: bool,
+    ):
+        cache_seqlens = metadata.sparse_cache_seqlens_int32
+        sparse_bs = cache_seqlens.numel()
+        create_flashinfer_kv_indices_triton[(sparse_bs,)](
+            metadata.sparse_page_table,
+            self.flashinfer_active_rows,
+            cache_seqlens,
+            self.flashinfer_active_kv_indptr,
+            None,
+            self.flashinfer_active_kv_indices,
+            metadata.sparse_page_table.stride(0),
+        )
+        kwargs = {
+            "sm_scale": layer.scaling,
+            "logits_soft_cap": layer.logit_cap or None,
+            "k_scale": layer.k_scale_float,
+            "v_scale": layer.v_scale_float,
+        }
+        if is_prefill:
+            result = self.flashinfer_active_wrapper.forward(
+                q,
+                (key_cache, value_cache),
+                causal=True,
+                **kwargs,
+            )
+        else:
+            result = self.flashinfer_active_wrapper.forward(
+                q,
+                (key_cache, value_cache),
+                **kwargs,
+            )
+        return result
 
     def get_topk_for_sparse(
         self,
@@ -913,26 +1102,46 @@ class MiniCPMSparseBackend(AttentionBackend):
             -1, self.page_size, layer.tp_v_head_num // 2, layer.head_dim
         )
 
-        result = flash_attn_with_kvcache(
-            q=q.contiguous().view(-1, layer.tp_q_head_num // 2, layer.head_dim),
-            k_cache=key_cache,
-            v_cache=value_cache,
-            page_table=metadata.sparse_page_table,
-            cache_seqlens=metadata.sparse_cache_seqlens_int32,
-            cu_seqlens_q=metadata.sparse_cu_seqlens_q,
-            cu_seqlens_k_new=metadata.sparse_cu_seqlens_k,
-            max_seqlen_q=metadata.sparse_max_seq_len_q,
-            softmax_scale=layer.scaling,
-            causal=causal,
-            window_size=window_size,
-            softcap=layer.logit_cap,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            return_softmax_lse=False,
-            num_splits=self.num_splits,
-            ver=self.fa_impl_ver,
-            **kwargs,
+        q_by_head_group = q.contiguous().view(
+            -1, layer.tp_q_head_num // 2, layer.head_dim
         )
+        if self.use_flashinfer:
+            if sinks is not None:
+                raise NotImplementedError(
+                    "minicpm_flashinfer does not support attention sinks"
+                )
+            if not self.flashinfer_prefill_planned:
+                self._prepare_flashinfer(metadata, is_prefill=True)
+                self.flashinfer_prefill_planned = True
+            result = self._forward_flashinfer(
+                q_by_head_group,
+                key_cache,
+                value_cache,
+                metadata,
+                layer,
+                is_prefill=True,
+            )
+        else:
+            result = flash_attn_with_kvcache(
+                q=q_by_head_group,
+                k_cache=key_cache,
+                v_cache=value_cache,
+                page_table=metadata.sparse_page_table,
+                cache_seqlens=metadata.sparse_cache_seqlens_int32,
+                cu_seqlens_q=metadata.sparse_cu_seqlens_q,
+                cu_seqlens_k_new=metadata.sparse_cu_seqlens_k,
+                max_seqlen_q=metadata.sparse_max_seq_len_q,
+                softmax_scale=layer.scaling,
+                causal=causal,
+                window_size=window_size,
+                softcap=layer.logit_cap,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                return_softmax_lse=False,
+                num_splits=self.num_splits,
+                ver=self.fa_impl_ver,
+                **kwargs,
+            )
 
         if metadata.sparse_batch_size < bs:
             dense_bs_list = [i for i in range(bs) if i not in metadata.sparse_bs_list]
@@ -974,8 +1183,6 @@ class MiniCPMSparseBackend(AttentionBackend):
         k_rope: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert self.fa_impl_ver in [3], "Only FA3 support decoding"
-
         # Check for unsupported features
         if layer.is_cross_attention:
             raise NotImplementedError(
@@ -1073,26 +1280,40 @@ class MiniCPMSparseBackend(AttentionBackend):
         sparse_cu_seqlens_k = metadata.sparse_cu_seqlens_k
         sparse_cu_seqlens_q = metadata.sparse_cu_seqlens_q
 
-        result = flash_attn_with_kvcache(
-            q=q_reshaped_by_head_group,
-            k_cache=key_cache_by_head_group,
-            v_cache=value_cache_by_head_group,
-            page_table=metadata.sparse_page_table,
-            cache_seqlens=sparse_cache_seqlens,
-            cu_seqlens_q=sparse_cu_seqlens_q,
-            cu_seqlens_k_new=sparse_cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q,
-            softmax_scale=layer.scaling,
-            causal=causal,
-            window_size=window_size,
-            softcap=layer.logit_cap,
-            k_descale=k_descale,
-            v_descale=v_descale,
-            return_softmax_lse=False,
-            num_splits=self.num_splits,
-            ver=self.fa_impl_ver,
-            **kwargs,
-        )
+        if self.use_flashinfer:
+            if sinks is not None:
+                raise NotImplementedError(
+                    "minicpm_flashinfer does not support attention sinks"
+                )
+            result = self._forward_flashinfer(
+                q_reshaped_by_head_group,
+                key_cache_by_head_group,
+                value_cache_by_head_group,
+                metadata,
+                layer,
+                is_prefill=False,
+            )
+        else:
+            result = flash_attn_with_kvcache(
+                q=q_reshaped_by_head_group,
+                k_cache=key_cache_by_head_group,
+                v_cache=value_cache_by_head_group,
+                page_table=metadata.sparse_page_table,
+                cache_seqlens=sparse_cache_seqlens,
+                cu_seqlens_q=sparse_cu_seqlens_q,
+                cu_seqlens_k_new=sparse_cu_seqlens_k,
+                max_seqlen_q=max_seqlen_q,
+                softmax_scale=layer.scaling,
+                causal=causal,
+                window_size=window_size,
+                softcap=layer.logit_cap,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                return_softmax_lse=False,
+                num_splits=self.num_splits,
+                ver=self.fa_impl_ver,
+                **kwargs,
+            )
 
         return result.view(-1, layer.tp_q_head_num * layer.v_head_dim)
 
@@ -1207,6 +1428,13 @@ class MiniCPMSparseBackend(AttentionBackend):
             self._bind_sparse_graph_metadata(forward_batch, metadata)
         else:
             self._replay_sparse_graph_metadata(forward_batch, metadata)
+        if self.use_flashinfer:
+            self._prepare_flashinfer(
+                metadata,
+                is_prefill=False,
+                graph=True,
+                in_capture=in_capture,
+            )
         self.forward_metadata = metadata
 
     def _build_sparse_decode_replay_metadata(

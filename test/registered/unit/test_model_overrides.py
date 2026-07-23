@@ -334,15 +334,34 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                 )
 
     def test_sparse_minicpm_defaults_to_sparse_attention_backend(self):
-        for architecture in ("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"):
-            with self.subTest(architecture=architecture):
-                self.assertEqual(
-                    self._minicpm_overrides(
-                        architecture,
-                        sparse_attention=True,
-                    )["attention_backend"],
-                    "minicpm_flashattn",
-                )
+        with patch.object(
+            overrides_module,
+            "is_blackwell_supported",
+            return_value=False,
+        ):
+            for architecture in ("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"):
+                with self.subTest(architecture=architecture):
+                    self.assertEqual(
+                        self._minicpm_overrides(
+                            architecture,
+                            sparse_attention=True,
+                        )["attention_backend"],
+                        "minicpm_flashattn",
+                    )
+
+    def test_sparse_minicpm_defaults_to_flashinfer_on_blackwell(self):
+        with patch.object(
+            overrides_module,
+            "is_blackwell_supported",
+            return_value=True,
+        ):
+            self.assertEqual(
+                self._minicpm_overrides(
+                    "MiniCPMSALAForCausalLM",
+                    sparse_attention=True,
+                )["attention_backend"],
+                "minicpm_flashinfer",
+            )
 
     def test_minicpm_preserves_explicit_attention_backend(self):
         overrides = self._minicpm_overrides(

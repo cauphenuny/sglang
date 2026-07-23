@@ -261,6 +261,7 @@ def create_dual_chunk_flash_attn_backend(runner):
 
 
 @register_attention_backend("minicpm_flashattn")
+@register_attention_backend("minicpm_flashinfer")
 def create_minicpm_backend(runner):
     from sglang.srt.layers.attention.minicpm.backend import MiniCPMSparseBackend
 

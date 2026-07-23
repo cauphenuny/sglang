@@ -758,7 +758,11 @@ def _minicpm_sala_overrides(server_args: Any, hf_config: Any) -> dict:
     if has_hybrid_attention:
         overrides["disable_radix_cache"] = True
     if has_sparse_attention and server_args.is_attention_backend_not_set():
-        overrides["attention_backend"] = "minicpm_flashattn"
+        overrides["attention_backend"] = (
+            "minicpm_flashinfer"
+            if is_blackwell_supported()
+            else "minicpm_flashattn"
+        )
     return overrides
 
 
