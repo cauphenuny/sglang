@@ -107,7 +107,7 @@ python3 -m sglang.launch_server \
 
 ### 工具调用（Tool Calling）
 
-启动服务时添加 `--tool-call-parser minicpm4_xml` 参数即可启用工具调用：
+启动服务时添加 `--tool-call-parser minicpm5` 参数即可启用工具调用：
 
 ```bash
 # 激活环境
@@ -126,7 +126,7 @@ python3 -m sglang.launch_server \
     --skip-server-warmup \
     --port 31111 \
     --minicpm-dense-as-sparse \
-    --tool-call-parser minicpm4_xml
+    --tool-call-parser minicpm5
 ```
 
 **请求示例：**
