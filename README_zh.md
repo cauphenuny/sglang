@@ -84,7 +84,7 @@ python3 -m sglang.launch_server \
     --model ${MODEL_PATH} \
     --trust-remote-code \
     --disable-radix-cache \
-    --attention-backend minicpm_flashinfer \
+    --attention-backend minicpm_flashattn \
     --chunked-prefill-size 8192 \
     --max-running-requests 32 \
     --skip-server-warmup \
@@ -96,7 +96,7 @@ python3 -m sglang.launch_server \
 |------|------|
 | `--trust-remote-code` | 允许加载模型自带的自定义代码 |
 | `--disable-radix-cache` | 禁用 RadixAttention 前缀缓存 |
-| `--attention-backend minicpm_flashinfer` | 使用 MiniCPM FlashInfer 注意力后端 |
+| `--attention-backend minicpm_flashattn` | 使用 MiniCPM FlashAttention 注意力后端 |
 | `--chunked-prefill-size 8192` | chunked prefill 大小 |
 | `--max-running-requests 32` | 最大并发推理请求数 |
 | `--skip-server-warmup` | 跳过服务预热 |
@@ -120,7 +120,7 @@ python3 -m sglang.launch_server \
     --model ${MODEL_PATH} \
     --trust-remote-code \
     --disable-radix-cache \
-    --attention-backend minicpm_flashinfer \
+    --attention-backend minicpm_flashattn \
     --chunked-prefill-size 8192 \
     --max-running-requests 32 \
     --skip-server-warmup \

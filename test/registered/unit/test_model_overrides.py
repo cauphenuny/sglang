@@ -303,10 +303,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                 )
 
     def test_minicpm_force_dense_uses_stock_attention_backend(self):
-        for backend, expected in (
-            ("minicpm_flashattn", "fa3"),
-            ("minicpm_flashinfer", "flashinfer"),
-        ):
+        for backend, expected in (("minicpm_flashattn", "fa3"),):
             with self.subTest(backend=backend):
                 self.assertEqual(
                     self._minicpm_overrides(
