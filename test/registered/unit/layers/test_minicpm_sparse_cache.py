@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sglang.srt.layers.attention.minicpm.cache import MiniCPMReqToTokenPool
+from sglang.srt.layers.attention.minicpm.cache import attach_compressed_cache
+from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=5, suite="base-a-test-cpu")
@@ -45,13 +46,17 @@ class ChunkCacheStub:
 
 
 def make_pool_and_req(capacity: int = 64):
-    pool = MiniCPMReqToTokenPool(
+    pool = ReqToTokenPool(
         size=2,
         max_context_len=64,
         device="cpu",
         enable_memory_saver=False,
+    )
+    attach_compressed_cache(
+        pool,
         kernel_size=4,
         kernel_stride=2,
+        enable_memory_saver=False,
     )
     req = SimpleNamespace(
         req_pool_idx=None,

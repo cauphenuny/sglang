@@ -1,25 +1,43 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
 from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
 from sglang.srt.mem_cache.allocation import alloc_token_slots
-from sglang.srt.mem_cache.memory_pool import HybridReqToTokenPool, ReqToTokenPool
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
 if TYPE_CHECKING:
-    from sglang.srt.configs.mamba_utils import BaseLinearStateParams
     from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
     from sglang.srt.mem_cache.kv_cache_configurator import KVCacheConfigurator
+    from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 
 
 class MiniCPMCompressedCache:
-    def __init__(self, pool, kernel_size: int, kernel_stride: int):
+    def __init__(
+        self,
+        pool: ReqToTokenPool,
+        *,
+        kernel_size: int,
+        kernel_stride: int,
+        enable_memory_saver: bool,
+    ):
         self.pool = pool
         self.kernel_size = kernel_size
         self.kernel_stride = kernel_stride
+        saver = TorchMemorySaverAdapter.create(enable=enable_memory_saver)
+        with saver.region(GPU_MEMORY_TYPE_KV_CACHE):
+            k1_size = (pool.max_context_len - kernel_size) // kernel_stride + 1
+            k2_size = (pool.max_context_len - kernel_size * 4) // (
+                kernel_stride * 4
+            ) + 1
+            pool.req_to_sparse_k1_token = torch.zeros(
+                (pool._alloc_size, k1_size), dtype=torch.int32, device=pool.device
+            )
+            pool.req_to_sparse_k2_token = torch.zeros(
+                (pool._alloc_size, k2_size), dtype=torch.int32, device=pool.device
+            )
         self.allocated_lens = [
             [0] * pool._alloc_size,
             [0] * pool._alloc_size,
@@ -138,143 +156,22 @@ class MiniCPMCompressedCache:
         self.allocator = None
 
 
-class _MiniCPMSparsePoolMixin:
-    def _init_compressed_cache(
-        self,
-        *,
-        max_context_len: int,
-        device: str,
-        enable_memory_saver: bool,
-        kernel_size: int,
-        kernel_stride: int,
-    ) -> None:
-        saver = TorchMemorySaverAdapter.create(enable=enable_memory_saver)
-        with saver.region(GPU_MEMORY_TYPE_KV_CACHE):
-            k1_size = (max_context_len - kernel_size) // kernel_stride + 1
-            k2_size = (max_context_len - kernel_size * 4) // (kernel_stride * 4) + 1
-            self.req_to_sparse_k1_token = torch.zeros(
-                (self._alloc_size, k1_size), dtype=torch.int32, device=device
-            )
-            self.req_to_sparse_k2_token = torch.zeros(
-                (self._alloc_size, k2_size), dtype=torch.int32, device=device
-            )
-        self.compressed_cache = MiniCPMCompressedCache(self, kernel_size, kernel_stride)
-
-    def alloc_aux_for_extend(
-        self,
-        *,
-        tree_cache: BasePrefixCache,
-        req_pool_indices_cpu: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
-    ) -> None:
-        self.compressed_cache.alloc_for_extend(
-            tree_cache, req_pool_indices_cpu, seq_lens_cpu
-        )
-
-    def alloc_aux_for_decode(
-        self,
-        *,
-        tree_cache: BasePrefixCache,
-        req_pool_indices_cpu: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
-        token_per_req: int,
-    ) -> None:
-        self.compressed_cache.alloc_for_decode(
-            tree_cache,
-            req_pool_indices_cpu,
-            seq_lens_cpu,
-            token_per_req,
-        )
-
-    def free(self, req) -> None:
-        assert req.req_pool_idx is not None, "request must have req_pool_idx"
-        self.compressed_cache.free(req.req_pool_idx)
-        super().free(req)
-
-    def clear(self) -> None:
-        super().clear()
-        self.compressed_cache.clear()
-
-
-class MiniCPMReqToTokenPool(_MiniCPMSparsePoolMixin, ReqToTokenPool):
-    def __init__(
-        self,
-        size: int,
-        max_context_len: int,
-        device: str,
-        enable_memory_saver: bool,
-        kernel_size: int,
-        kernel_stride: int,
-    ):
-        super().__init__(
-            size=size,
-            max_context_len=max_context_len,
-            device=device,
-            enable_memory_saver=enable_memory_saver,
-        )
-        self._init_compressed_cache(
-            max_context_len=max_context_len,
-            device=device,
-            enable_memory_saver=enable_memory_saver,
+def attach_compressed_cache(
+    pool: ReqToTokenPool,
+    *,
+    kernel_size: int,
+    kernel_stride: int,
+    enable_memory_saver: bool,
+) -> ReqToTokenPool:
+    pool.attach_aux_cache(
+        MiniCPMCompressedCache(
+            pool,
             kernel_size=kernel_size,
             kernel_stride=kernel_stride,
-        )
-
-
-class MiniCPMHybridReqToTokenPool(_MiniCPMSparsePoolMixin, HybridReqToTokenPool):
-    def __init__(
-        self,
-        *,
-        size: int,
-        max_context_len: int,
-        device: str,
-        enable_memory_saver: bool,
-        kernel_size: int,
-        kernel_stride: int,
-        cache_params: Optional[BaseLinearStateParams] = None,
-        mamba_size: int = None,
-        mamba_spec_state_size: int = None,
-        enable_mamba_extra_buffer: bool = False,
-        enable_mamba_extra_buffer_lazy: bool = False,
-        speculative_num_draft_tokens: int = None,
-        speculative_eagle_topk: Optional[int] = None,
-        mamba_layer_ids: List[int] = None,
-        enable_overlap_schedule: bool = True,
-        start_layer: Optional[int] = None,
-        enable_linear_replayssm: bool = False,
-        linear_replayssm_cache_len: int = 16,
-        mamba_envelope_layout: bool = False,
-    ):
-        if mamba_layer_ids is None and cache_params is not None:
-            mamba_layer_ids = cache_params.layers
-        super().__init__(
-            size=size,
-            mamba_size=mamba_size if mamba_size is not None else size,
-            mamba_spec_state_size=(
-                mamba_spec_state_size if mamba_spec_state_size is not None else 0
-            ),
-            max_context_len=max_context_len,
-            device=device,
             enable_memory_saver=enable_memory_saver,
-            cache_params=cache_params,
-            enable_mamba_extra_buffer=enable_mamba_extra_buffer,
-            enable_mamba_extra_buffer_lazy=enable_mamba_extra_buffer_lazy,
-            speculative_num_draft_tokens=speculative_num_draft_tokens,
-            speculative_eagle_topk=speculative_eagle_topk,
-            mamba_layer_ids=mamba_layer_ids or [],
-            enable_overlap_schedule=enable_overlap_schedule,
-            start_layer=start_layer,
-            enable_linear_replayssm=enable_linear_replayssm,
-            linear_replayssm_cache_len=linear_replayssm_cache_len,
-            mamba_envelope_layout=mamba_envelope_layout,
         )
-        self._init_compressed_cache(
-            max_context_len=max_context_len,
-            device=device,
-            enable_memory_saver=enable_memory_saver,
-            kernel_size=kernel_size,
-            kernel_stride=kernel_stride,
-        )
+    )
+    return pool
 
 
 def create_req_to_token_pool(
@@ -286,50 +183,24 @@ def create_req_to_token_pool(
 ):
     config = configurator.model_config.hf_config
     server_args = configurator.server_args
-    common = dict(
-        size=size,
-        max_context_len=max_context_len,
-        device=configurator.device,
-        enable_memory_saver=enable_memory_saver,
-    )
     sparse = config.has_minicpm_sparse_attention and not server_args.minicpm_force_dense
     cache_params = config.mamba2_cache_params
-
+    extra_max_context_len = max_context_len - configurator.model_config.context_len
     if cache_params is None:
-        if not sparse:
-            return ReqToTokenPool(**common)
-        return MiniCPMReqToTokenPool(
-            **common,
-            kernel_size=config.sparse_kernel_size,
-            kernel_stride=config.sparse_kernel_stride,
+        pool = configurator._build_default_req_pool(
+            max_num_reqs=size,
+            extra_max_context_len=extra_max_context_len,
         )
-
-    hybrid = dict(
-        **common,
-        cache_params=cache_params,
-        mamba_size=server_args.max_mamba_cache_size,
-        mamba_spec_state_size=size,
-        enable_mamba_extra_buffer=server_args.enable_mamba_extra_buffer(),
-        enable_mamba_extra_buffer_lazy=server_args.enable_mamba_extra_buffer_lazy(),
-        speculative_num_draft_tokens=server_args.max_speculative_num_draft_tokens,
-        speculative_eagle_topk=server_args.speculative_eagle_topk,
-        enable_linear_replayssm=server_args.enable_linear_replayssm,
-        linear_replayssm_cache_len=server_args.linear_replayssm_cache_len,
-        mamba_envelope_layout=server_args.enable_page_major_kv_layout,
-        mamba_layer_ids=[
-            layer_id
-            for layer_id in cache_params.layers
-            if configurator.layer_info.start_layer
-            <= layer_id
-            < configurator.layer_info.end_layer
-        ],
-        enable_overlap_schedule=not server_args.disable_overlap_schedule,
-        start_layer=configurator.layer_info.start_layer,
+    else:
+        pool = configurator._build_hybrid_req_pool(
+            max_num_reqs=size,
+            extra_max_context_len=extra_max_context_len,
+        )
+    if not sparse:
+        return pool
+    return attach_compressed_cache(
+        pool,
+        kernel_size=config.sparse_kernel_size,
+        kernel_stride=config.sparse_kernel_stride,
+        enable_memory_saver=enable_memory_saver,
     )
-    if sparse:
-        return MiniCPMHybridReqToTokenPool(
-            **hybrid,
-            kernel_size=config.sparse_kernel_size,
-            kernel_stride=config.sparse_kernel_stride,
-        )
-    return HybridReqToTokenPool(**hybrid)

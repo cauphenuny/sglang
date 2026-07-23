@@ -263,6 +263,7 @@ class ReqToTokenPool:
             )
         self.free_slots = list(range(1, self._alloc_size))
         self.req_generation = torch.zeros(self._alloc_size, dtype=torch.int64)
+        self._aux_cache = None
 
     def write(self, indices, values):
         self.req_to_token[indices] = values
@@ -300,12 +301,28 @@ class ReqToTokenPool:
 
     def free(self, req: Req):
         assert req.req_pool_idx is not None, "request must have req_pool_idx"
+        if self._aux_cache is not None:
+            self._aux_cache.free(req.req_pool_idx)
         self.free_slots.append(req.req_pool_idx)
         req.req_pool_idx = None
 
     def clear(self):
         self.free_slots = list(range(1, self._alloc_size))
         self.req_generation.zero_()
+        if self._aux_cache is not None:
+            self._aux_cache.clear()
+
+    def attach_aux_cache(self, aux_cache) -> None:
+        assert self._aux_cache is None
+        self._aux_cache = aux_cache
+
+    def alloc_aux_for_extend(self, **kwargs) -> None:
+        if self._aux_cache is not None:
+            self._aux_cache.alloc_for_extend(**kwargs)
+
+    def alloc_aux_for_decode(self, **kwargs) -> None:
+        if self._aux_cache is not None:
+            self._aux_cache.alloc_for_decode(**kwargs)
 
 
 class MambaPool:
