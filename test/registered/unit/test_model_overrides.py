@@ -281,13 +281,28 @@ class TestGoldenModelOverrides(_IsolatedPublish):
     }
 
     @staticmethod
-    def _minicpm_overrides(architecture, *, force_dense=False, attention_backend=None):
+    def _minicpm_overrides(
+        architecture, *, sparse_attention=False, attention_backend=None
+    ):
         args = SimpleNamespace(
-            minicpm_force_dense=force_dense,
             attention_backend=attention_backend,
+            prefill_attention_backend=None,
+            decode_attention_backend=None,
+        )
+        args.is_attention_backend_not_set = lambda: all(
+            backend is None
+            for backend in (
+                args.attention_backend,
+                args.prefill_attention_backend,
+                args.decode_attention_backend,
+            )
         )
         declarations = collect_model_override_declarations(
-            architecture, args, hf_config=SimpleNamespace()
+            architecture,
+            args,
+            hf_config=SimpleNamespace(
+                has_minicpm_sparse_attention=sparse_attention,
+            ),
         )
         return {
             field: value
@@ -302,17 +317,24 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                     self._minicpm_overrides(architecture)["disable_radix_cache"]
                 )
 
-    def test_minicpm_force_dense_uses_stock_attention_backend(self):
-        for backend, expected in (("minicpm_flashattn", "fa3"),):
-            with self.subTest(backend=backend):
+    def test_sparse_minicpm_defaults_to_sparse_attention_backend(self):
+        for architecture in ("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"):
+            with self.subTest(architecture=architecture):
                 self.assertEqual(
                     self._minicpm_overrides(
-                        "MiniCPMSALAForCausalLM",
-                        force_dense=True,
-                        attention_backend=backend,
+                        architecture,
+                        sparse_attention=True,
                     )["attention_backend"],
-                    expected,
+                    "minicpm_flashattn",
                 )
+
+    def test_minicpm_preserves_explicit_attention_backend(self):
+        overrides = self._minicpm_overrides(
+            "MiniCPMSALAForCausalLM",
+            sparse_attention=True,
+            attention_backend="fa3",
+        )
+        self.assertNotIn("attention_backend", overrides)
 
     def _construct(self, arch, model_type, config_extra=None, **server_kwargs):
         from sglang.srt.server_args import ServerArgs

@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from sglang.jit_kernel.flash_attention import flash_attn_with_kvcache
 from sglang.srt.configs.minicpm import MiniCPMHybridConfig
+from sglang.srt.environ import envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.flashattention_backend import (
     FlashAttentionBackend,
@@ -100,7 +101,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.init_blocks = hf_config.sparse_init_blocks
         self.block_size = hf_config.sparse_block_size
         self.window_size = hf_config.sparse_window_size
-        self.minicpm_dense_as_sparse = model_runner.server_args.minicpm_dense_as_sparse
+        self.minicpm_dense_as_sparse = envs.SGLANG_MINICPM_DENSE_AS_SPARSE.get()
         self.dense_len = (
             0 if self.minicpm_dense_as_sparse else hf_config.sparse_dense_len
         )
@@ -122,8 +123,8 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.k2_kernel_size = self.kernel_size * 4
         self.k2_kernel_stride = self.kernel_stride * 4
 
-        self.minicpm_fuse_topk = model_runner.server_args.minicpm_fuse_topk
-        self.minicpm_split_stage1 = model_runner.server_args.minicpm_split_stage1
+        self.minicpm_fuse_topk = envs.SGLANG_MINICPM_FUSE_TOPK.get()
+        self.minicpm_split_stage1 = envs.SGLANG_MINICPM_SPLIT_STAGE1.get()
 
         max_cache_len = self.max_context_len
         pooled_k_len = (max_cache_len + self.block_size - 1) // self.block_size
@@ -153,7 +154,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             - 1
         )
 
-        if model_runner.server_args.minicpm_fuse_topk:
+        if self.minicpm_fuse_topk:
             for bs in range(1, model_runner.server_args.max_running_requests + 1):
                 decode_kernel = fused_attn_pooling_online_topk_decode(
                     batch_size=bs,

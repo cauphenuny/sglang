@@ -1551,22 +1551,6 @@ class ServerArgs:
         bool,
         "Disable cuda graph when padding is needed. Still uses cuda graph when padding is not needed.",
     ] = False
-    minicpm_fuse_topk: A[
-        bool,
-        "Fuse stage1, maxpool, and top-k in MiniCPM into a single kernel.",
-    ] = False
-    minicpm_split_stage1: A[
-        bool,
-        "Split MiniCPM stage1 into bmm, softmax, and reduce_sum.",
-    ] = False
-    minicpm_dense_as_sparse: A[
-        bool,
-        "Treat dense batches as sparse in MiniCPM.",
-    ] = False
-    minicpm_force_dense: A[
-        bool,
-        "Force dense attention in MiniCPM.",
-    ] = False
     enable_profile_cuda_graph: A[bool, "Enable profiling of cuda graph capture."] = (
         False
     )

@@ -80,7 +80,7 @@ source sglang_minicpm_sala_env/bin/activate
 # 启动推理服务（将 MODEL_PATH 替换为实际模型路径）
 MODEL_PATH=/path/to/your/model
 
-python3 -m sglang.launch_server \
+SGLANG_MINICPM_DENSE_AS_SPARSE=1 python3 -m sglang.launch_server \
     --model ${MODEL_PATH} \
     --trust-remote-code \
     --disable-radix-cache \
@@ -88,8 +88,7 @@ python3 -m sglang.launch_server \
     --chunked-prefill-size 8192 \
     --max-running-requests 32 \
     --skip-server-warmup \
-    --port 31111 \
-    --minicpm-dense-as-sparse
+    --port 31111
 ```
 
 | 参数 | 说明 |
@@ -101,7 +100,14 @@ python3 -m sglang.launch_server \
 | `--max-running-requests 32` | 最大并发推理请求数 |
 | `--skip-server-warmup` | 跳过服务预热 |
 | `--port 31111` | 服务端口 |
-| `--minicpm-dense-as-sparse` | 使用 dense-as-sparse 模式 |
+| `SGLANG_MINICPM_DENSE_AS_SPARSE=1` | 使用 dense-as-sparse 模式 |
+
+开发/调试用的 kernel A/B 开关使用环境变量：
+
+| 环境变量 | 说明 |
+|------|------|
+| `SGLANG_MINICPM_FUSE_TOPK=1` | 融合 stage1、maxpool 和 top-k |
+| `SGLANG_MINICPM_SPLIT_STAGE1=1` | 拆分 stage1 的 bmm、softmax 和 reduce |
 
 > **提示：** 为获得最佳生成效果，建议在请求时设置 `temperature=0.9`。
 
@@ -116,7 +122,7 @@ source sglang_minicpm_sala_env/bin/activate
 # 启动推理服务（启用工具调用，将 MODEL_PATH 替换为实际模型路径）
 MODEL_PATH=/path/to/your/model
 
-python3 -m sglang.launch_server \
+SGLANG_MINICPM_DENSE_AS_SPARSE=1 python3 -m sglang.launch_server \
     --model ${MODEL_PATH} \
     --trust-remote-code \
     --disable-radix-cache \
@@ -125,7 +131,6 @@ python3 -m sglang.launch_server \
     --max-running-requests 32 \
     --skip-server-warmup \
     --port 31111 \
-    --minicpm-dense-as-sparse \
     --tool-call-parser minicpm5
 ```
 
@@ -365,5 +370,5 @@ rustc --version   # 建议 ≥ 1.85（旧版可能不认 edition2024）
 - 这是 **Triton 内核缓存损坏**（某个缓存的 metadata JSON 是空/截断的，多因之前的运行在写缓存时
   被 kill/OOM/Ctrl+C 中断）。和模型迁移无关。
 - 清掉 Triton 缓存后重跑即可：`rm -rf ~/.triton/cache`（设了 `TRITON_CACHE_DIR` 则删对应目录）。
-- 注意：稀疏路径（不带 `--minicpm-force-dense`，如 RULER）才会触发部分 Triton kernel，
+- 注意：配置中启用 sparse attention 的路径（如 RULER）才会触发部分 Triton kernel，
   所以可能 dense 的 GSM8K 跑通、稀疏的 RULER 才暴露此问题。

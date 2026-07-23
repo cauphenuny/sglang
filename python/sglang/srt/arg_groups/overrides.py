@@ -751,12 +751,11 @@ def _moss_vl_overrides(server_args: Any, hf_config: Any) -> dict:
 @_register_for("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM")
 def _minicpm_sala_overrides(server_args: Any, hf_config: Any) -> dict:
     overrides: Dict[str, Any] = {"disable_radix_cache": True}
-    if server_args.minicpm_force_dense:
-        dense_backends = {
-            "minicpm_flashattn": "fa3",
-        }
-        if dense_backend := dense_backends.get(server_args.attention_backend):
-            overrides["attention_backend"] = dense_backend
+    if (
+        getattr(hf_config, "has_minicpm_sparse_attention", False)
+        and server_args.is_attention_backend_not_set()
+    ):
+        overrides["attention_backend"] = "minicpm_flashattn"
     return overrides
 
 
