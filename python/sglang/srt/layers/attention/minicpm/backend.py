@@ -154,12 +154,6 @@ class MiniCPMSparseBackend(AttentionBackend):
         )
 
         if model_runner.server_args.minicpm_fuse_topk:
-            bucketed_actual_max_seqlen_q = _bucket_size(
-                model_runner.server_args.chunked_prefill_size
-            )
-            bucketed_actual_max_seqlen_k = _bucket_size(
-                self.max_context_len // self.kernel_stride
-            )
             for bs in range(1, model_runner.server_args.max_running_requests + 1):
                 decode_kernel = fused_attn_pooling_online_topk_decode(
                     batch_size=bs,
@@ -186,8 +180,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                     topk=kernel_topk,
                     max_seqlen_q_grid=model_runner.server_args.chunked_prefill_size,  # Bucketed for grid
                     pooled_k_len=bucketed_pooled_k_len,
-                    actual_max_seqlen_q=bucketed_actual_max_seqlen_q,  # Bucketed for causal mask
-                    actual_max_seqlen_k=bucketed_actual_max_seqlen_k,  # Bucketed for causal mask
                     m_block_dim=16,
                     block_stride=pooling_block_stride,
                     pad_len=pooling_pad_len,

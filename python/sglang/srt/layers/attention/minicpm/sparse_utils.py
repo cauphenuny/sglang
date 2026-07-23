@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
@@ -20,17 +20,13 @@ if TYPE_CHECKING:
     )
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
-import math
-
 import tilelang
 import tilelang.math
 import triton
 from sgl_kernel import infllmv2_attn_stage1, max_pooling_1d_varlen
 
-from sglang.srt.layers.attention.minicpm.fuse_kernel import _bucket_size
 from sglang.srt.layers.attention.minicpm.sparse_kernels import (
     compress_k_complete_kernel_new,
-    compress_k_complete_kernel_new_padded,
 )
 from sglang.srt.model_executor.forward_context import get_token_to_kv_pool
 
@@ -75,8 +71,8 @@ def compress_k_core_new(
     kernel_size,
     kernel_stride,
     max_context_length,
+    padded=False,
 ):
-
     head_num_k = key_cache.shape[1]
     head_dim = key_cache.shape[2]
 
@@ -87,7 +83,11 @@ def compress_k_core_new(
     # Use provided explicit parameters for buffer allocation
     # max_chunks_per_seq is already the maximum possible chunks for any sequence
     # given max_context_length, kernel_size, and kernel_stride
-    max_chunks_per_seq = max(0, (max_context_length - kernel_size) // kernel_stride + 1)
+    max_chunks_per_seq = (
+        max_context_length // kernel_stride
+        if padded
+        else max(0, (max_context_length - kernel_size) // kernel_stride + 1)
+    )
 
     # ==============================================================================
     # Launch kernel for ALL chunks (history + new)
@@ -131,6 +131,7 @@ def compress_k_core_new(
         kernel_stride,
         BLOCK_SIZE,
         max_grid_chunks,  # Pass the limit to kernel for loop control
+        PADDED=padded,
     )
 
     return
@@ -214,64 +215,6 @@ def get_compress_k_v2(
     return
 
 
-def compress_k_core_new_padded(
-    full_compressed_k,  # output
-    layer,
-    batch,
-    k_stride,
-    key_cache,
-    token_table,
-    compressed_k_table,
-    new_k_token_nums,
-    cu_new_k_token_nums,
-    history_compress_k_token_nums,
-    cu_new_compress_k_token_nums,
-    new_compress_k_token_nums,
-    total_compress_k_token_nums,
-    cu_total_compress_k_token_nums,
-    kernel_size,
-    kernel_stride,
-    max_context_length,
-):
-    """Padded layout version: stores data in batch-major order for reshape compatibility."""
-    head_num_k = key_cache.shape[1]
-    head_dim = key_cache.shape[2]
-
-    # Compute max_chunks_per_seq for padded layout
-    # Must match: batch_size * max_context_length // kernel_stride
-    max_chunks_per_seq = max_context_length // kernel_stride
-
-    MAX_GRID_CHUNKS = 1024  # Adjustable limit for grid dimension
-    max_grid_chunks = min(max_chunks_per_seq, MAX_GRID_CHUNKS)
-
-    BLOCK_SIZE = triton.next_power_of_2(head_dim)
-    grid = (batch, max_grid_chunks, head_num_k)
-
-    compress_k_complete_kernel_new_padded[grid](
-        key_cache,
-        token_table,
-        cu_new_k_token_nums,
-        history_compress_k_token_nums,
-        k_stride,
-        compressed_k_table,
-        cu_new_compress_k_token_nums,
-        cu_total_compress_k_token_nums,
-        total_compress_k_token_nums,
-        full_compressed_k,
-        batch,
-        max_chunks_per_seq,
-        token_table.shape[1],
-        compressed_k_table.shape[1],
-        head_num_k,
-        head_dim,
-        kernel_size,
-        kernel_stride,
-        BLOCK_SIZE,
-        max_grid_chunks,
-    )
-    return
-
-
 def get_compress_k_v2_padded(
     layer,
     forward_batch,
@@ -292,7 +235,7 @@ def get_compress_k_v2_padded(
     key_cache = key_cache.view(-1, layer.tp_k_head_num, layer.head_dim)
 
     # deal with k1
-    compress_k_core_new_padded(
+    compress_k_core_new(
         full_compressed_k1,
         layer,
         batch,
@@ -310,10 +253,11 @@ def get_compress_k_v2_padded(
         k1_l,
         k1_stride,
         max_context_length,
+        padded=True,
     )
 
     # deal with k2
-    compress_k_core_new_padded(
+    compress_k_core_new(
         full_compressed_k2,
         layer,
         batch,
@@ -331,6 +275,7 @@ def get_compress_k_v2_padded(
         k2_l,
         k2_stride,
         max_context_length,
+        padded=True,
     )
 
     return
@@ -587,7 +532,6 @@ def compressed_attention_tilelang(
         # q shape: [total_q_len, num_kv_heads, groups, head_dim] or [total_q_len, num_heads, head_dim]
         # k shape: [total_k_len, num_kv_heads, head_dim]
         total_q_len = q.shape[0]
-        total_k_len = k.shape[0]
         num_kv_heads = k.shape[1]
         head_dim = k.shape[2]
 
@@ -611,30 +555,9 @@ def compressed_attention_tilelang(
 
         k_kernel = k.contiguous()
 
-        # Compute pooled_k_len using infllmv2 formula (based on block count):
-        # total_len = max_seqlen_q + cache_len
-        # out_len = (total_len + block_size - 1) // block_size
-        if is_prefilling:
-            # Prefill: use the actual max_seqlen_q
-            total_len = max_seqlen_q
-            pooled_k_len = (max_cache_len + block_size - 1) // block_size
-        else:
-            # Decode: use fixed max_cache_len for CUDA Graph compatibility
-            # Kernel uses actual_pooled_k_len internally for dynamic bounds checking
-            pooled_k_len = (max_cache_len + block_size - 1) // block_size
-            # assert decode_fused_kernel is not None, "decode_fused_kernel is not initialized"
+        pooled_k_len = (max_cache_len + block_size - 1) // block_size
 
         assert fused_kernel is not None, "fused_kernel is not initialized"
-
-        # Pooling parameters - aligned with infllmv2_cuda_impl:
-        # block_stride = block_size // kernel_stride = 64 // 16 = 4
-        # pad_len = kernel_size // kernel_stride - 1 = 32 // 16 - 1 = 1
-        # num_offs = kernel_size // kernel_stride + block_size // kernel_stride - 1 = 2 + 4 - 1 = 5
-        pooling_block_stride = block_size // kernel_stride  # = 64 // 16 = 4
-        pooling_pad_len = kernel_size // kernel_stride - 1  # = 32 // 16 - 1 = 1
-        pooling_num_offs = (
-            kernel_size // kernel_stride + block_size // kernel_stride - 1
-        )  # = 2 + 4 - 1 = 5
 
         # Compute actual output topk (same as original: min(topk, num_blocks))
         output_topk = min(topk, pooled_k_len)
@@ -646,14 +569,6 @@ def compressed_attention_tilelang(
         if kernel_topk != tilelang.math.next_power_of_2(kernel_topk):
             kernel_topk = tilelang.math.next_power_of_2(kernel_topk) // 2
         kernel_topk = max(8, kernel_topk)  # Minimum topk for kernel
-
-        # Determine dtype string
-        if q.dtype == torch.float16:
-            dtype_str = "float16"
-        elif q.dtype == torch.bfloat16:
-            dtype_str = "bfloat16"
-        else:
-            dtype_str = "bfloat16"
 
         # Allocate output tensors
         topk_indices = torch.full(
@@ -675,12 +590,6 @@ def compressed_attention_tilelang(
             # Compiles once per unique bucket combination
             # Supports chunk prefill with cache_lens tensor
             # =================================================================
-            # bucketed_max_seqlen_q = _bucket_size(max_seqlen_q)
-            bucketed_pooled_k_len = _bucket_size(pooled_k_len)
-            # Also bucket actual_max_seqlen_q/k to reduce kernel recompilation
-            # bucketed_actual_max_seqlen_q = _bucket_size(max_seqlen_q)
-            # bucketed_actual_max_seqlen_k = _bucket_size(max_seqlen_k)
-
             # Prepare cache_lens tensor for chunk prefill support
             # For standard prefill: cache_lens is None -> use zeros
             # For chunk prefill: cache_lens has values -> use as-is
@@ -706,27 +615,8 @@ def compressed_attention_tilelang(
             # DECODE: max_seqlen_q=1 (fixed), cache_lens passed as tensor
             # Compiles ONCE and reuses for all decode steps!
             # =================================================================
-            bucketed_pooled_k_len = _bucket_size(pooled_k_len)
-
             # Prepare cache_lens as tensor (runtime value, not compile-time constant!)
             cache_lens_tensor = cache_lens.to(torch.int32)
-
-            # kernel = fused_attn_pooling_online_topk_decode(
-            #     batch_size=batch_size,
-            #     groups=groups,
-            #     heads=num_heads,
-            #     dim=head_dim,
-            #     topk=kernel_topk,
-            #     pooled_k_len=bucketed_pooled_k_len,
-            #     m_block_dim=16,
-            #     block_stride=pooling_block_stride,
-            #     pad_len=pooling_pad_len,
-            #     num_offs=pooling_num_offs,
-            #     block_size=block_size,
-            #     init_blocks=init_blocks,
-            #     local_blocks=local_blocks,
-            #     dtype_str=dtype_str
-            # )
 
             # Run decode kernel with cache_lens as tensor
             fused_kernel(
@@ -780,49 +670,6 @@ class CompressionLevelMetadata:
     cu_new_compress_token_nums: Optional[torch.Tensor] = None
     total_compress_token_nums: Optional[torch.Tensor] = None
     cu_total_compress_token_nums: Optional[torch.Tensor] = None
-
-
-@dataclass
-class SparseMetadata:
-    """Metadata for sparse attention in a forward batch.
-
-    This dataclass contains all metadata required for sparse attention processing,
-    including sequence lengths, cumulative sequence lengths, page tables,
-    and token mapping information.
-
-    The metadata is computed once per forward batch and reused across layers.
-    """
-
-    # Flag indicating whether sparse attention is enabled for this batch
-    sparse_enabled: bool = False
-
-    # Sequence length metadata
-    sparse_cache_seqlens_int32: Optional[torch.Tensor] = None
-    sparse_max_seq_len_q: int = 1
-    sparse_max_seq_len_k: int = 0
-    sparse_cu_seqlens_q: Optional[torch.Tensor] = None
-    sparse_cu_seqlens_k: Optional[torch.Tensor] = None
-
-    # Compression level metadata (k1 and k2)
-    k1: CompressionLevelMetadata = field(default_factory=CompressionLevelMetadata)
-    k2: CompressionLevelMetadata = field(default_factory=CompressionLevelMetadata)
-
-    # Page table for sparse attention
-    sparse_page_table: Optional[torch.Tensor] = None
-
-    # Token mapping for sparse attention
-    token_to_bs: Optional[torch.Tensor] = None
-    token_pos_in_bs: Optional[torch.Tensor] = None
-    seqlen_q_sparse_bs_tensor: Optional[torch.Tensor] = None
-    seqlen_k_sparse_bs_tensor: Optional[torch.Tensor] = None
-
-    # TopK indices for sparse attention (computed by frontend)
-    topk_indices: Optional[torch.Tensor] = None
-
-    # Chunk prefill metadata
-    sparse_bs_list: Optional[list] = None
-    old_bs_to_new_bs_range: Optional[torch.Tensor] = None
-    sparse_cu_seqlens_q_cpu: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -964,35 +811,6 @@ class SparseBatchAnalyzer:
 
         return sparse_bs_list
 
-    def is_sparse_batch(
-        self, batch_idx: int, forward_batch: ForwardBatch, minicpm_dense_as_sparse: bool
-    ) -> bool:
-        """Check if a specific batch index needs sparse attention.
-
-        Args:
-            batch_idx: The batch index to check
-            forward_batch: The forward batch containing the batch
-
-        Returns:
-            True if the batch needs sparse attention, False otherwise
-        """
-        return bool(
-            forward_batch.seq_lens_cpu[batch_idx] >= self.config.dense_len
-            or minicpm_dense_as_sparse
-        )
-
-    def get_sparse_batch_count(self, forward_batch: ForwardBatch) -> int:
-        """Get the count of sparse batches in the forward batch.
-
-        Args:
-            forward_batch: The forward batch to analyze
-
-        Returns:
-            Number of sparse batches
-        """
-        sparse_bs_list = self.identify_sparse_batches(forward_batch)
-        return len(sparse_bs_list)
-
 
 class SparseMetadataBuilder:
     """Builder for constructing sparse attention metadata.
@@ -1102,23 +920,6 @@ class SparseMetadataBuilder:
             )
 
         return token_to_bs, token_pos_in_bs
-
-    def build_page_table_base(
-        self, sparse_bs_list: list[int], base_metadata: object
-    ) -> torch.Tensor:
-        """Build page table reference for sparse batches.
-
-        This method returns a reference to the sparse page table from the base metadata.
-        The page table is not modified or filtered - this is a zero-copy reference.
-
-        Args:
-            sparse_bs_list: List of batch indices that are sparse (not used but kept for consistency)
-            base_metadata: Base metadata containing sparse_page_table
-
-        Returns:
-            Reference to the sparse page table tensor
-        """
-        return base_metadata.sparse_page_table
 
     def _compute_single_compression_metadata(
         self,
@@ -1386,9 +1187,9 @@ class SparseMetadataBuilder:
                     )
                     pt += 1
 
-        assert (
-            pt == sparse_page_table_bs
-        ), f"sparse_page_table_bs {sparse_page_table_bs} vs pt {pt}"
+        assert pt == sparse_page_table_bs, (
+            f"sparse_page_table_bs {sparse_page_table_bs} vs pt {pt}"
+        )
 
         sparse_cu_seqlens_q = sparse_cu_seqlens_q_cpu.to(device=cu_seqlens_q.device)
 
@@ -1492,70 +1293,6 @@ class SparseMetadataBuilder:
             "sparse_page_table": sparse_page_table,
             "token_to_bs": token_to_bs,
         }
-
-    def build(
-        self, forward_batch: ForwardBatch, base_metadata: object
-    ) -> SparseMetadata:
-        """Build complete sparse metadata for the forward batch.
-
-        This method orchestrates the entire metadata building process:
-        1. Identify sparse batches
-        2. Build sequence lengths
-        3. Build token mappings
-        4. Get page table from base metadata
-
-        Args:
-            forward_batch: The forward batch to build metadata for
-            base_metadata: Base metadata containing page_table, cu_seqlens_q, etc.
-
-        Returns:
-            SparseMetadata instance with all fields populated
-        """
-        # Identify sparse batches
-        analyzer = SparseBatchAnalyzer(self.config)
-        sparse_bs_list = analyzer.identify_sparse_batches(forward_batch)
-
-        # Build sequence lengths
-        seqlen_q_sparse_bs, seqlen_k_sparse_bs_tensor = self.build_sequence_lengths(
-            base_metadata.cu_seqlens_q, forward_batch.extend_prefix_lens, sparse_bs_list
-        )
-
-        # Build cumulative sequence lengths for sparse batches
-        cu_seqlens_q_sparse_bs_cpu = torch.tensor(
-            [0] + seqlen_q_sparse_bs,
-            dtype=torch.int32,
-            device="cpu",
-        ).cumsum(dtype=torch.int32, dim=0)
-
-        # Extract prefix lengths for sparse batches only
-        extend_prefix_lens_sparse = forward_batch.extend_prefix_lens_cpu[sparse_bs_list]
-
-        # Build token mappings
-        token_to_bs, token_pos_in_bs = self.build_token_mappings(
-            cu_seqlens_q_sparse_bs_cpu, extend_prefix_lens_sparse, seqlen_q_sparse_bs
-        )
-
-        # Get page table
-        sparse_page_table = self.build_page_table_base(sparse_bs_list, base_metadata)
-
-        # Create SparseMetadata instance
-        metadata = SparseMetadata(
-            sparse_bs_list=sparse_bs_list,
-            sparse_cu_seqlens_q_cpu=cu_seqlens_q_sparse_bs_cpu,
-            seqlen_q_sparse_bs_tensor=torch.tensor(
-                seqlen_q_sparse_bs,
-                dtype=torch.int32,
-                device=forward_batch.cu_seqlens_q.device,
-            ),
-            seqlen_k_sparse_bs_tensor=seqlen_k_sparse_bs_tensor,
-            token_to_bs=token_to_bs,
-            token_pos_in_bs=token_pos_in_bs,
-            sparse_page_table=sparse_page_table,
-            sparse_max_seq_len_q=max(seqlen_q_sparse_bs),
-            sparse_max_seq_len_k=max(seqlen_q_sparse_bs),
-        )
-
-        return metadata
 
     def build_prefill_topk_metadata(
         self,
@@ -1703,7 +1440,6 @@ class SparseMetadataBuilder:
 
 __all__ = [
     "CompressionLevelMetadata",
-    "SparseMetadata",
     "SparseConfig",
     "SparseBatchAnalyzer",
     "SparseMetadataBuilder",

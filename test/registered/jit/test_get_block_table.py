@@ -2,7 +2,6 @@ import pytest
 import torch
 
 from sglang.jit_kernel.minicpm_sala.get_block_table import (
-    get_block_table_v1,
     get_block_table_v2,
     get_block_table_v3,
 )
@@ -56,6 +55,26 @@ def _make_valid_inputs(token_num, seqlen_q_max, topk, batch_size=1, device="cuda
     return topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
 
 
+def _get_block_table_reference(
+    topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
+):
+    token_num = topk_idx.shape[1]
+    source = topk_idx.permute(1, 0, 2).unsqueeze(
+        -1
+    ) * _SPARSE_BLOCK_SIZE + torch.arange(_SPARSE_BLOCK_SIZE, device=topk_idx.device)
+    valid = (source >= 0) & (
+        source
+        < torch.minimum(seqlen_q[token_to_bs], token_pos_in_bs).view(token_num, 1, 1, 1)
+    )
+    gathered = torch.gather(
+        block_table[token_to_bs],
+        1,
+        source.reshape(token_num, -1).clamp(0, block_table.shape[1] - 1),
+    ).view_as(source)
+    heads = torch.arange(_HEAD_GROUP, device=topk_idx.device).view(1, -1, 1, 1)
+    return torch.where(valid, gathered * _HEAD_GROUP + heads, 0).flatten(2)
+
+
 def _golden_check_v2(out_block_table, block_table, token_num):
     """The assertions ported verbatim from the original test_v2.py."""
     # check token 32
@@ -90,19 +109,17 @@ def test_get_block_table_v2_golden(topk):
 
 
 @pytest.mark.parametrize("topk", [96, 128])
-def test_get_block_table_versions_agree(topk):
-    """v1, v2, v3 must produce identical block tables for well-formed input.
+def test_get_block_table_versions_match_reference(topk):
+    """The prefill and decode kernels match the Torch reference.
 
-    Uses only non-negative block indices because the original v3 kernel has no
-    ``sparse_block_idx < 0`` guard (so the variants only agree on valid inputs).
+    Inputs contain only non-negative block indices because v3 assumes valid
+    top-k output.
     """
     token_num, seqlen_q_max = 2048, 2048
     inputs = _make_valid_inputs(token_num, seqlen_q_max, topk)
-    out1 = get_block_table_v1(*inputs)
-    out2 = get_block_table_v2(*inputs)
-    out3 = get_block_table_v3(*inputs)
-    assert torch.equal(out1, out2)
-    assert torch.equal(out1, out3)
+    expected = _get_block_table_reference(*inputs)
+    assert torch.equal(expected, get_block_table_v2(*inputs))
+    assert torch.equal(expected, get_block_table_v3(*inputs))
 
 
 @pytest.mark.parametrize("topk", [96, 128])
@@ -115,9 +132,6 @@ def test_get_block_table_matches_reference(topk):
     ext = pytest.importorskip("sparse_kernel_extension")
     token_num, seqlen_q_max = 4096, 4096
     inputs = _make_valid_inputs(token_num, seqlen_q_max, topk)
-
-    ref_v1 = ext.get_block_table_v1(*inputs, topk)
-    assert torch.equal(ref_v1, get_block_table_v1(*inputs))
 
     ref_v2 = ext.get_block_table_v2(*inputs, topk)
     assert torch.equal(ref_v2, get_block_table_v2(*inputs))

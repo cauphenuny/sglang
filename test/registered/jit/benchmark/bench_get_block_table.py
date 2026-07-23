@@ -10,7 +10,6 @@ from sglang.jit_kernel.benchmark.utils import (
     run_benchmark,
 )
 from sglang.jit_kernel.minicpm_sala import (
-    get_block_table_v1,
     get_block_table_v2,
     get_block_table_v3,
 )
@@ -32,7 +31,6 @@ TOKEN_NUM_LIST = get_benchmark_range(
 configs = list(itertools.product(TOKEN_NUM_LIST))
 
 _VERSION_FNS = {
-    "v1": get_block_table_v1,
     "v2": get_block_table_v2,
     "v3": get_block_table_v3,
 }
@@ -61,7 +59,9 @@ def _make_valid_inputs(token_num: int, topk: int, device: str = DEFAULT_DEVICE):
 
 def _bench_one(token_num: int, provider: str):
     inputs = _make_valid_inputs(token_num, _TOPK)
-    fn = lambda: _VERSION_FNS[provider](*inputs)
+
+    def fn():
+        return _VERSION_FNS[provider](*inputs)
 
     # Trigger JIT compilation + module caching before timing so it never
     # happens inside the CUDA graph capture done by run_benchmark.
@@ -76,9 +76,9 @@ def _bench_one(token_num: int, provider: str):
         x_names=["token_num"],
         x_vals=configs,
         line_arg="provider",
-        line_vals=["v1", "v2", "v3"],
-        line_names=["get_block_table_v1", "get_block_table_v2", "get_block_table_v3"],
-        styles=[("blue", "-"), ("green", "-."), ("red", "--")],
+        line_vals=["v2", "v3"],
+        line_names=["get_block_table_v2", "get_block_table_v3"],
+        styles=[("green", "-."), ("red", "--")],
         ylabel="us",
         plot_name="get-block-table-performance",
         args={},
@@ -91,12 +91,12 @@ def benchmark(token_num: int, provider: str):
 if __name__ == "__main__":
     # Print a plain-text table directly instead of benchmark.run(), which pulls
     # in matplotlib via triton's plotting path (not always available locally).
-    header = f"{'token_num':>10} | {'v1 (us)':>12} {'v2 (us)':>12} {'v3 (us)':>12}"
+    header = f"{'token_num':>10} | {'v2 (us)':>12} {'v3 (us)':>12}"
     print(header)
     print("-" * len(header))
     for token_num in TOKEN_NUM_LIST:
         cells = []
-        for provider in ("v1", "v2", "v3"):
+        for provider in ("v2", "v3"):
             median_us, _, _ = _bench_one(token_num, provider)
             cells.append(f"{median_us:>12.3f}")
         print(f"{token_num:>10} | " + " ".join(cells))

@@ -54,7 +54,6 @@ def _jit_get_block_table_module(topk: int) -> Module:
         *args,
         cuda_files=["minicpm_sala/get_block_table.cuh"],
         cuda_wrappers=[
-            ("get_block_table_v1", f"minicpm_sala::get_block_table_v1<{args}>"),
             ("get_block_table_v2", f"minicpm_sala::get_block_table_v2<{args}>"),
             ("get_block_table_v3", f"minicpm_sala::get_block_table_v3<{args}>"),
         ],
@@ -91,17 +90,6 @@ def _run(
         out, topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
     )
     return out
-
-
-def get_block_table_v1(
-    topk_idx: torch.Tensor,
-    block_table: torch.Tensor,
-    token_to_bs: torch.Tensor,
-    token_pos_in_bs: torch.Tensor,
-    seqlen_q: torch.Tensor,
-) -> torch.Tensor:
-    """Build the sparse block table (prefill, 1 thread per token)."""
-    return _run(1, topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q)
 
 
 def get_block_table_v2(
