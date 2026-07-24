@@ -35,7 +35,14 @@ def _make_inputs(token_num, seqlen_q_max, topk, batch_size=1, device="cuda"):
     return topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
 
 
-def _make_valid_inputs(token_num, seqlen_q_max, topk, batch_size=1, device="cuda"):
+def _make_valid_inputs(
+    token_num,
+    seqlen_q_max,
+    topk,
+    batch_size=1,
+    head_group=_HEAD_GROUP,
+    device="cuda",
+):
     """Build well-formed inputs with only non-negative block indices.
 
     The original v3 kernel (unlike v1/v2) has no ``sparse_block_idx < 0`` guard,
@@ -44,7 +51,7 @@ def _make_valid_inputs(token_num, seqlen_q_max, topk, batch_size=1, device="cuda
     num_blocks = seqlen_q_max // _SPARSE_BLOCK_SIZE
     torch.manual_seed(0)
     topk_idx = torch.randint(
-        0, num_blocks, (_HEAD_GROUP, token_num, topk), dtype=torch.int32, device=device
+        0, num_blocks, (head_group, token_num, topk), dtype=torch.int32, device=device
     )
     block_table = torch.arange(
         1, seqlen_q_max * batch_size + 1, dtype=torch.int32, device=device
@@ -58,6 +65,7 @@ def _make_valid_inputs(token_num, seqlen_q_max, topk, batch_size=1, device="cuda
 def _get_block_table_reference(
     topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
 ):
+    head_group = topk_idx.shape[0]
     token_num = topk_idx.shape[1]
     source = topk_idx.permute(1, 0, 2).unsqueeze(
         -1
@@ -71,8 +79,15 @@ def _get_block_table_reference(
         1,
         source.reshape(token_num, -1).clamp(0, block_table.shape[1] - 1),
     ).view_as(source)
-    heads = torch.arange(_HEAD_GROUP, device=topk_idx.device).view(1, -1, 1, 1)
-    return torch.where(valid, gathered * _HEAD_GROUP + heads, 0).flatten(2)
+    heads = torch.arange(head_group, device=topk_idx.device).view(1, -1, 1, 1)
+    return torch.where(valid, gathered * head_group + heads, 0).flatten(2)
+
+
+def test_get_block_table_supports_tp_local_head_group():
+    inputs = _make_valid_inputs(64, 64, 96, head_group=1)
+    expected = _get_block_table_reference(*inputs)
+    actual = get_block_table_v2(*inputs, head_group_num=1)
+    assert torch.equal(expected, actual)
 
 
 def _golden_check_v2(out_block_table, block_table, token_num):

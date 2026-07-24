@@ -83,6 +83,30 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
 
         self.assertEqual(metadata["sparse_page_table"].shape, (2, 8192))
 
+    def test_decode_metadata_supports_one_local_head_group(self):
+        builder = SparseMetadataBuilder(_sparse_config(), num_kv_heads=1)
+        forward_batch = SimpleNamespace(
+            batch_size=1,
+            seq_lens_cpu=torch.tensor([10], dtype=torch.int32),
+        )
+        base_metadata = SimpleNamespace(
+            cache_seqlens_int32=torch.tensor([10], dtype=torch.int32),
+            page_table=torch.empty((1, 10), dtype=torch.int32),
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+        )
+
+        metadata = builder.build_sparse_decode_metadata(
+            forward_batch=forward_batch,
+            base_metadata=base_metadata,
+            head_group_num=1,
+            dense_len=8192,
+            sparse_topk=96,
+            block_size=64,
+        )
+
+        self.assertEqual(metadata["sparse_cache_seqlens_int32"].tolist(), [10])
+        self.assertEqual(metadata["sparse_page_table"].shape, (1, 8192))
+
     def test_compression_uses_configured_k1_k2_layout(self):
         layer = SimpleNamespace(layer_id=0, tp_k_head_num=1, head_dim=1)
         forward_batch = SimpleNamespace(req_pool_indices=[0])

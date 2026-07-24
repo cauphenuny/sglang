@@ -1168,14 +1168,16 @@ class SparseMetadataBuilder:
                 if sparse_cache_len > max_sparse_cache_len:
                     max_sparse_cache_len = sparse_cache_len
 
-                sparse_cache_seqlens_cpu[2 * b] = sparse_cache_len
-                sparse_cache_seqlens_cpu[2 * b + 1] = sparse_cache_len
+                sparse_cache_seqlens_cpu[
+                    b * head_group_num : (b + 1) * head_group_num
+                ] = sparse_cache_len
             else:
                 if cache_seqlens[b] > max_sparse_cache_len:
                     max_sparse_cache_len = cache_seqlens[b]
 
-                sparse_cache_seqlens_cpu[2 * b] = cache_seqlens[b]
-                sparse_cache_seqlens_cpu[2 * b + 1] = cache_seqlens[b]
+                sparse_cache_seqlens_cpu[
+                    b * head_group_num : (b + 1) * head_group_num
+                ] = cache_seqlens[b]
 
         sparse_cache_seqlens_int32 = sparse_cache_seqlens_cpu.to(
             device=cache_seqlens.device

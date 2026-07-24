@@ -85,7 +85,8 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.kv_cache_dtype_str = self.base_backend.kv_cache_dtype_str
         self.page_size = self.base_backend.page_size
         tp_size = get_parallel().attn_tp_size
-        self.num_kv_heads = model_runner.model_config.num_key_value_heads // tp_size
+        self.num_kv_heads = model_runner.model_config.get_num_kv_heads(tp_size)
+        self.num_q_heads = model_runner.model_config.num_attention_heads // tp_size
         self.fa_impl_ver = self.base_backend.fa_impl_ver
         self.num_splits = self.base_backend.num_splits
 
@@ -120,10 +121,8 @@ class MiniCPMSparseBackend(AttentionBackend):
 
         # Head group number derived from model configuration
         self.head_dim = model_runner.model_config.head_dim
-        self.head_group_num = model_runner.model_config.num_key_value_heads
-        self.heads_per_group = (
-            model_runner.model_config.num_attention_heads // self.head_group_num
-        )
+        self.head_group_num = self.num_kv_heads
+        self.heads_per_group = self.num_q_heads // self.head_group_num
         self.k1_kernel_size = self.kernel_size
         self.k1_kernel_stride = self.kernel_stride
         self.k2_kernel_size = self.kernel_size * 4
@@ -161,7 +160,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         )
         self.fused_kernel_kwargs = {
             "groups": self.heads_per_group,
-            "heads": model_runner.model_config.num_attention_heads,
+            "heads": self.num_q_heads,
             "dim": self.head_dim,
             "topk": kernel_topk,
             "pooled_k_len": bucketed_pooled_k_len,
@@ -205,7 +204,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 FlashInferAttnBackend,
             )
 
-            max_sparse_bs = model_runner.req_to_token_pool.size * 2
+            max_sparse_bs = model_runner.req_to_token_pool.size * self.head_group_num
             self.flashinfer_kv_indptr = torch.zeros(
                 max_sparse_bs + 1, dtype=torch.int32, device=self.device
             )
@@ -239,10 +238,10 @@ class MiniCPMSparseBackend(AttentionBackend):
             self.flashinfer_active_kv_last_page_len = None
             self.flashinfer_active_rows = None
             self.flashinfer_prefill_planned = False
-            self.flashinfer_num_qo_heads = (
-                model_runner.model_config.num_attention_heads // tp_size // 2
+            self.flashinfer_num_qo_heads = self.heads_per_group
+            self.flashinfer_num_kv_heads = (
+                self.num_kv_heads // self.head_group_num
             )
-            self.flashinfer_num_kv_heads = self.num_kv_heads // 2
             self.flashinfer_q_dtype = model_runner.dtype
             self.flashinfer_kv_dtype = model_runner.kv_cache_dtype
 
@@ -480,7 +479,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             kv_last_page_len = self.flashinfer_kv_last_page_len[:sparse_bs]
             kv_last_page_len.copy_((cache_seqlens > 0).to(torch.int32))
             rows = self.flashinfer_rows[:sparse_bs]
-            graph_bs = sparse_bs // 2
+            graph_bs = sparse_bs // self.head_group_num
             if graph and in_capture:
                 wrapper = self.flashinfer_backend._create_decode_wrappers(
                     graph_bs, sparse_bs
@@ -1016,6 +1015,8 @@ class MiniCPMSparseBackend(AttentionBackend):
                 metadata.token_to_bs,
                 metadata.token_pos_in_bs,
                 metadata.seqlen_k_sparse_bs_tensor,
+                head_group_num=self.head_group_num,
+                block_size=self.block_size,
             ).reshape(-1, self.num_sparse_topk_tokens)
 
             # copy page table for sparse bs
@@ -1042,7 +1043,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 minicpm_split_stage1=self.minicpm_split_stage1,
             )
 
-        q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num // 2, layer.head_dim)
+        q_reshaped = q.contiguous().view(-1, self.heads_per_group, layer.head_dim)
         if metadata.sparse_batch_size < bs:
             # copy dense page table for dense bs
             dense_bs_list = [i for i in range(bs) if i not in metadata.sparse_bs_list]
@@ -1052,10 +1053,12 @@ class MiniCPMSparseBackend(AttentionBackend):
                 sparse_page_table_idx_end = metadata.old_bs_to_new_bs_range[
                     dense_bs + 1
                 ]
-                assert sparse_page_table_idx_end - sparse_page_table_idx_start == 2, (
-                    "dense bs should have 2 head_group, but get {}".format(
-                        sparse_page_table_idx_end - sparse_page_table_idx_start
-                    )
+                assert (
+                    sparse_page_table_idx_end - sparse_page_table_idx_start
+                    == self.head_group_num
+                ), "dense bs should have {} head_group, but get {}".format(
+                    self.head_group_num,
+                    sparse_page_table_idx_end - sparse_page_table_idx_start,
                 )
 
                 ps = metadata.sparse_cu_seqlens_q_cpu[sparse_page_table_idx_start]
@@ -1068,16 +1071,18 @@ class MiniCPMSparseBackend(AttentionBackend):
                         len_, forward_batch.extend_seq_lens_cpu[dense_bs]
                     )
                 )
-                t = q_reshaped[ps : ps + 2 * len_, :, :].clone()
-                q_reshaped[ps : ps + len_, :, :] = t[0::2, :, :]
-                q_reshaped[ps + len_ : ps + 2 * len_, :, :] = t[1::2, :, :]
-
-                metadata.sparse_page_table[sparse_page_table_idx_start, :kv_len] = (
-                    page_table[dense_bs, :kv_len] * 2
+                group_num = self.head_group_num
+                q_end = ps + group_num * len_
+                t = q_reshaped[ps:q_end].clone()
+                q_reshaped[ps:q_end] = (
+                    t.view(len_, group_num, self.heads_per_group, layer.head_dim)
+                    .transpose(0, 1)
+                    .reshape(-1, self.heads_per_group, layer.head_dim)
                 )
-                metadata.sparse_page_table[sparse_page_table_idx_start + 1, :kv_len] = (
-                    page_table[dense_bs, :kv_len] * 2 + 1
-                )
+                for group in range(group_num):
+                    metadata.sparse_page_table[
+                        sparse_page_table_idx_start + group, :kv_len
+                    ] = (page_table[dense_bs, :kv_len] * group_num + group)
 
         metadata.sparse_cache_seqlens_int32 = (
             (metadata.sparse_page_table != 0)
@@ -1096,14 +1101,20 @@ class MiniCPMSparseBackend(AttentionBackend):
         key_cache, value_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
 
         key_cache = key_cache.view(
-            -1, self.page_size, layer.tp_k_head_num // 2, layer.head_dim
+            -1,
+            self.page_size,
+            layer.tp_k_head_num // self.head_group_num,
+            layer.head_dim,
         )
         value_cache = value_cache.view(
-            -1, self.page_size, layer.tp_v_head_num // 2, layer.head_dim
+            -1,
+            self.page_size,
+            layer.tp_v_head_num // self.head_group_num,
+            layer.head_dim,
         )
 
         q_by_head_group = q.contiguous().view(
-            -1, layer.tp_q_head_num // 2, layer.head_dim
+            -1, self.heads_per_group, layer.head_dim
         )
         if self.use_flashinfer:
             if sinks is not None:
@@ -1150,8 +1161,11 @@ class MiniCPMSparseBackend(AttentionBackend):
                 sparse_page_table_idx_end = metadata.old_bs_to_new_bs_range[
                     dense_bs + 1
                 ]
-                assert sparse_page_table_idx_end - sparse_page_table_idx_start == 2, (
-                    "dense bs should have 2 head_group"
+                assert (
+                    sparse_page_table_idx_end - sparse_page_table_idx_start
+                    == self.head_group_num
+                ), (
+                    f"dense bs should have {self.head_group_num} head_group"
                 )
 
                 ps = metadata.sparse_cu_seqlens_q_cpu[sparse_page_table_idx_start]
@@ -1164,9 +1178,14 @@ class MiniCPMSparseBackend(AttentionBackend):
                         len_, forward_batch.extend_seq_lens_cpu[dense_bs]
                     )
                 )
-                t = result[ps : ps + 2 * len_, :, :].clone()
-                result[ps : ps + 2 * len_ : 2, :, :] = t[0:len_, :, :]
-                result[ps + 1 : ps + 2 * len_ : 2, :, :] = t[len_ : 2 * len_, :, :]
+                group_num = self.head_group_num
+                result_end = ps + group_num * len_
+                t = result[ps:result_end].clone()
+                result[ps:result_end] = (
+                    t.view(group_num, len_, self.heads_per_group, layer.head_dim)
+                    .transpose(0, 1)
+                    .reshape(-1, self.heads_per_group, layer.head_dim)
+                )
 
         return result.view(-1, layer.tp_q_head_num * layer.head_dim)
 
@@ -1259,21 +1278,30 @@ class MiniCPMSparseBackend(AttentionBackend):
             metadata.token_to_bs,
             cache_seqlens,
             cache_seqlens,
+            head_group_num=self.head_group_num,
+            block_size=self.block_size,
         ).reshape(-1, self.num_sparse_topk_tokens)
 
-        metadata.sparse_page_table[: 2 * bs, : self.num_sparse_topk_tokens] = (
+        sparse_rows = self.head_group_num * bs
+        metadata.sparse_page_table[:sparse_rows, : self.num_sparse_topk_tokens] = (
             sparse_page_table[:, : self.num_sparse_topk_tokens]
         )
 
         q_reshaped_by_head_group = q_reshaped.reshape(
-            -1, layer.tp_q_head_num // 2, layer.head_dim
+            -1, self.heads_per_group, layer.head_dim
         )
         assert self.page_size == 1
         key_cache_by_head_group = key_cache.reshape(
-            -1, self.page_size, layer.tp_k_head_num // 2, layer.head_dim
+            -1,
+            self.page_size,
+            layer.tp_k_head_num // self.head_group_num,
+            layer.head_dim,
         )
         value_cache_by_head_group = value_cache.reshape(
-            -1, self.page_size, layer.tp_v_head_num // 2, layer.head_dim
+            -1,
+            self.page_size,
+            layer.tp_v_head_num // self.head_group_num,
+            layer.head_dim,
         )
 
         sparse_cache_seqlens = metadata.sparse_cache_seqlens_int32
@@ -1327,17 +1355,21 @@ class MiniCPMSparseBackend(AttentionBackend):
         buffers.update(
             {
                 "sparse_cache_seqlens": torch.full(
-                    (max_bs * 2,),
+                    (max_bs * self.head_group_num,),
                     self.num_sparse_topk_tokens,
                     dtype=torch.int32,
                     device=self.device,
                 ),
                 "sparse_cu_seqlens_q": torch.arange(
-                    0, max_bs * 2 + 1, dtype=torch.int32, device=self.device
+                    0,
+                    max_bs * self.head_group_num + 1,
+                    dtype=torch.int32,
+                    device=self.device,
                 ),
                 "sparse_cu_seqlens_k": torch.arange(
                     0,
-                    (max_bs * 2 + 1) * self.num_sparse_topk_tokens,
+                    (max_bs * self.head_group_num + 1)
+                    * self.num_sparse_topk_tokens,
                     self.num_sparse_topk_tokens,
                     dtype=torch.int32,
                     device=self.device,
@@ -1349,7 +1381,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                     max_bs, dtype=torch.int32, device=self.device
                 ),
                 "sparse_page_table": torch.zeros(
-                    max_bs * 2,
+                    max_bs * self.head_group_num,
                     sparse_max_num_pages,
                     dtype=torch.int32,
                     device=self.device,
@@ -1472,12 +1504,19 @@ class MiniCPMSparseBackend(AttentionBackend):
     ):
         bs = forward_batch.batch_size
         buffers = self.decode_cuda_graph_metadata
-        metadata.sparse_cache_seqlens_int32 = buffers["sparse_cache_seqlens"][: 2 * bs]
-        metadata.sparse_cu_seqlens_q = buffers["sparse_cu_seqlens_q"][: 2 * bs + 1]
-        metadata.sparse_cu_seqlens_k = buffers["sparse_cu_seqlens_k"][: 2 * bs + 1]
+        sparse_rows = self.head_group_num * bs
+        metadata.sparse_cache_seqlens_int32 = buffers["sparse_cache_seqlens"][
+            :sparse_rows
+        ]
+        metadata.sparse_cu_seqlens_q = buffers["sparse_cu_seqlens_q"][
+            : sparse_rows + 1
+        ]
+        metadata.sparse_cu_seqlens_k = buffers["sparse_cu_seqlens_k"][
+            : sparse_rows + 1
+        ]
         metadata.token_to_bs = buffers["token_to_bs"][:bs]
         metadata.token_pos_in_bs = buffers["token_pos_in_bs"][:bs]
-        metadata.sparse_page_table = buffers["sparse_page_table"][: 2 * bs]
+        metadata.sparse_page_table = buffers["sparse_page_table"][:sparse_rows]
         metadata.total_q = bs
 
         assume_kv_len = self.config_dense_len
@@ -1538,10 +1577,11 @@ class MiniCPMSparseBackend(AttentionBackend):
         decode_metadata, compression_metadata = (
             self._build_sparse_decode_replay_metadata(sparse_forward_batch, metadata)
         )
-        metadata.sparse_cache_seqlens_int32[: 2 * real_bs].copy_(
+        real_sparse_rows = self.head_group_num * real_bs
+        metadata.sparse_cache_seqlens_int32[:real_sparse_rows].copy_(
             decode_metadata["sparse_cache_seqlens_int32"]
         )
-        metadata.sparse_cu_seqlens_k[: 2 * real_bs + 1].copy_(
+        metadata.sparse_cu_seqlens_k[: real_sparse_rows + 1].copy_(
             decode_metadata["sparse_cu_seqlens_k"]
         )
         metadata.cache_seqlens_int32_stage1[:real_bs].copy_(
@@ -1580,8 +1620,8 @@ class MiniCPMSparseBackend(AttentionBackend):
             dst.table.copy_(req_to_sparse[forward_batch.req_pool_indices])
 
         if real_bs < bs:
-            metadata.sparse_cache_seqlens_int32[2 * real_bs :].zero_()
-            metadata.sparse_cu_seqlens_k[2 * real_bs + 1 :].fill_(
+            metadata.sparse_cache_seqlens_int32[real_sparse_rows:].zero_()
+            metadata.sparse_cu_seqlens_k[real_sparse_rows + 1 :].fill_(
                 decode_metadata["sparse_cu_seqlens_k"][-1]
             )
             metadata.cache_seqlens_int32_stage1[real_bs:].zero_()

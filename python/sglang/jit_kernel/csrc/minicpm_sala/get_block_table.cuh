@@ -23,9 +23,6 @@
 
 namespace minicpm_sala {
 
-// Layout constants (fixed by the MiniCPM-SALA model configuration).
-constexpr int kHeadGroup = 2;
-constexpr int kSparseBlockSize = 64;
 constexpr int kTopkPerBlock = 16;
 
 // topk_idx:        [head_group, token_num, kSparseTopK]  int32
@@ -38,7 +35,7 @@ constexpr int kTopkPerBlock = 16;
 // 1 thread calc 64 element of out_block_table.
 // This allows topk_idx to be read once and all corresponding
 // out_block_table elements calculated, reducing memory access.
-template <int kSparseTopK>
+template <int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
 __global__ void get_block_table_cuda_v2(
     const int* topk_idx,
     const int* block_table,
@@ -77,7 +74,7 @@ __global__ void get_block_table_cuda_v2(
 
 // opt for decode: 1 thread calc 1 element of out_block_table, block size 1024,
 // smem 1024 / 64 = 16.
-template <int kSparseTopK>
+template <int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
 __global__ void get_block_table_cuda_v3(
     const int* topk_idx,
     const int* block_table,
@@ -126,7 +123,7 @@ namespace {
 // Validate all inputs that are shared across the two kernel variants and
 // bind the symbolic dims (token_num / batch_size / seqlen_q_max). The output
 // tensor is pre-allocated and zero-initialized on the Python side.
-template <int kSparseTopK>
+template <int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
 void verify_inputs(
     tvm::ffi::TensorView out,
     tvm::ffi::TensorView topk_idx,
@@ -171,7 +168,7 @@ void verify_inputs(
 
 }  // namespace
 
-template <int kSparseTopK>
+template <int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
 void get_block_table_v2(
     tvm::ffi::TensorView out,
     tvm::ffi::TensorView topk_idx,
@@ -183,7 +180,7 @@ void get_block_table_v2(
   SymbolicSize token_num{"token_num"}, batch_size{"batch_size"}, seqlen_q_max{"seqlen_q_max"};
   SymbolicDevice device;
   device.set_options<kDLCUDA>();
-  verify_inputs<kSparseTopK>(
+  verify_inputs<kSparseTopK, kHeadGroup, kSparseBlockSize>(
       out, topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q, token_num, batch_size, seqlen_q_max, device);
 
   const int n_token = static_cast<int>(token_num.unwrap());
@@ -195,7 +192,7 @@ void get_block_table_v2(
   const int64_t num_blocks = (total + kThreadsPerBlock - 1) / kThreadsPerBlock;
 
   LaunchKernel(num_blocks, kThreadsPerBlock, dev)(
-      get_block_table_cuda_v2<kSparseTopK>,
+      get_block_table_cuda_v2<kSparseTopK, kHeadGroup, kSparseBlockSize>,
       static_cast<const int*>(topk_idx.data_ptr()),
       static_cast<const int*>(block_table.data_ptr()),
       static_cast<const int*>(token_to_bs.data_ptr()),
@@ -206,7 +203,7 @@ void get_block_table_v2(
       n_token);
 }
 
-template <int kSparseTopK>
+template <int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
 void get_block_table_v3(
     tvm::ffi::TensorView out,
     tvm::ffi::TensorView topk_idx,
@@ -218,7 +215,7 @@ void get_block_table_v3(
   SymbolicSize token_num{"token_num"}, batch_size{"batch_size"}, seqlen_q_max{"seqlen_q_max"};
   SymbolicDevice device;
   device.set_options<kDLCUDA>();
-  verify_inputs<kSparseTopK>(
+  verify_inputs<kSparseTopK, kHeadGroup, kSparseBlockSize>(
       out, topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q, token_num, batch_size, seqlen_q_max, device);
 
   const int n_token = static_cast<int>(token_num.unwrap());
@@ -230,7 +227,7 @@ void get_block_table_v3(
   const int64_t num_blocks = (total + kThreadsPerBlock - 1) / kThreadsPerBlock;
 
   LaunchKernel(num_blocks, kThreadsPerBlock, dev)(
-      get_block_table_cuda_v3<kSparseTopK>,
+      get_block_table_cuda_v3<kSparseTopK, kHeadGroup, kSparseBlockSize>,
       static_cast<const int*>(topk_idx.data_ptr()),
       static_cast<const int*>(block_table.data_ptr()),
       static_cast<const int*>(token_to_bs.data_ptr()),

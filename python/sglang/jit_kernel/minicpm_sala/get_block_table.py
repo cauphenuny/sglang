@@ -16,10 +16,6 @@ from sglang.jit_kernel.utils import (
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
 
-# Layout constants fixed by the MiniCPM-SALA model configuration. Mirror the
-# `constexpr` values in csrc/minicpm_sala/get_block_table.cuh.
-_HEAD_GROUP = 2
-_SPARSE_BLOCK_SIZE = 64
 # Supported compile-time topk values (matches the original VALUE_SPLITS_SWITCH).
 _SUPPORTED_TOPK = (96, 128)
 
@@ -41,16 +37,18 @@ def _get_cccl_include_paths() -> list[str]:
 
 
 @cache_once
-def _jit_get_block_table_module(topk: int) -> Module:
+def _jit_get_block_table_module(
+    topk: int, head_group_num: int, block_size: int
+) -> Module:
     """Compile and cache the JIT module for a given sparse topk value.
 
     One module is built per topk value, replacing the original runtime
     ``VALUE_SPLITS_SWITCH(topk, ...)`` dispatch with a compile-time template
     argument ``kSparseTopK``.
     """
-    args = make_cpp_args(topk)
+    args = make_cpp_args(topk, head_group_num, block_size)
     return load_jit(
-        f"get_block_table_topk{topk}",
+        f"get_block_table_topk{topk}_g{head_group_num}_b{block_size}",
         *args,
         cuda_files=["minicpm_sala/get_block_table.cuh"],
         cuda_wrappers=[
@@ -68,6 +66,8 @@ def _run(
     token_to_bs: torch.Tensor,
     token_pos_in_bs: torch.Tensor,
     seqlen_q: torch.Tensor,
+    head_group_num: int,
+    block_size: int,
 ) -> torch.Tensor:
     if topk_idx.dim() != 3:
         raise RuntimeError(
@@ -81,11 +81,11 @@ def _run(
         )
 
     out = torch.zeros(
-        (token_num, _HEAD_GROUP, topk * _SPARSE_BLOCK_SIZE),
+        (token_num, head_group_num, topk * block_size),
         dtype=torch.int32,
         device=topk_idx.device,
     )
-    module = _jit_get_block_table_module(topk)
+    module = _jit_get_block_table_module(topk, head_group_num, block_size)
     getattr(module, f"get_block_table_v{version}")(
         out, topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
     )
@@ -98,9 +98,20 @@ def get_block_table_v2(
     token_to_bs: torch.Tensor,
     token_pos_in_bs: torch.Tensor,
     seqlen_q: torch.Tensor,
+    head_group_num: int = 2,
+    block_size: int = 64,
 ) -> torch.Tensor:
     """Build the sparse block table (1 thread per (token, head, topk) entry)."""
-    return _run(2, topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q)
+    return _run(
+        2,
+        topk_idx,
+        block_table,
+        token_to_bs,
+        token_pos_in_bs,
+        seqlen_q,
+        head_group_num,
+        block_size,
+    )
 
 
 def get_block_table_v3(
@@ -109,6 +120,17 @@ def get_block_table_v3(
     token_to_bs: torch.Tensor,
     token_pos_in_bs: torch.Tensor,
     seqlen_q: torch.Tensor,
+    head_group_num: int = 2,
+    block_size: int = 64,
 ) -> torch.Tensor:
     """Build the sparse block table (decode-optimized, 1 thread per output)."""
-    return _run(3, topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q)
+    return _run(
+        3,
+        topk_idx,
+        block_table,
+        token_to_bs,
+        token_pos_in_bs,
+        seqlen_q,
+        head_group_num,
+        block_size,
+    )

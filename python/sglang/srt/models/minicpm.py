@@ -38,9 +38,12 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.model_loader.weight_utils import default_weight_loader
+from sglang.srt.model_loader.weight_utils import (
+    default_weight_loader,
+    sharded_weight_loader,
+)
 from sglang.srt.runtime_context import get_parallel
-from sglang.srt.utils import add_prefix
+from sglang.srt.utils import add_prefix, set_weight_attrs
 from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 
@@ -276,6 +279,9 @@ class MiniCPMLightningMixer(nn.Module):
 
         if self.use_output_norm:
             self.o_norm = RMSNorm(self.num_heads * self.head_dim, eps=self.rms_norm_eps)
+            set_weight_attrs(
+                self.o_norm.weight, {"weight_loader": sharded_weight_loader(0)}
+            )
 
         if self.use_output_gate:
             self.z_proj = ColumnParallelLinear(
