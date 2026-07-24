@@ -583,167 +583,14 @@ class CompressionLevelMetadata(msgspec.Struct):
     cu_total_compress_token_nums: Optional[torch.Tensor] = None
 
 
-class SparseConfig(msgspec.Struct):
-    """Configuration for sparse attention in MiniCPM models.
-
-    This struct stores all sparse attention configuration parameters,
-    including kernel sizes, block sizes, top-K selection, and model
-    architecture parameters.
-
-    The configuration is derived from the model's hf_config and
-    model_config, and is used by SparseBatchAnalyzer to compute
-    metadata for sparse attention batches.
-    """
-
-    # Basic sparse config parameters (from hf_config)
-    sparse_len: int  # Threshold for activating sparse attention
-    sparse_topk: int  # Number of top-K global blocks to select
-    kernel_size: int  # Kernel size for compressed key computation
-    kernel_stride: int  # Kernel stride for compressed key computation
-    block_size: int  # Block size for top-K selection
-    window_size: int  # Window size for sliding window attention
-    dense_len: int  # Length of dense attention at beginning
-
-    # Model architecture parameters
-    head_dim: int  # Dimension of each attention head
-    num_kv_heads: int  # Number of key-value heads
-    head_group_num: int  # Number of head groups for sparse attention
-
-    # Compressor kernel sizes
-    k1_kernel_size: int
-    k1_kernel_stride: int
-    k2_kernel_size: int
-    k2_kernel_stride: int
-
-    @property
-    def local_blocks(self) -> int:
-        """Number of local blocks (window_size // block_size)."""
-        return self.window_size // self.block_size
-
-    @property
-    def sparse_topk_total(self) -> int:
-        """Total top-K including local blocks (topk + local_blocks)."""
-        return self.sparse_topk + self.local_blocks
-
-    @property
-    def num_sparse_topk_tokens(self) -> int:
-        """Total number of tokens in sparse top-K selection."""
-        return self.block_size * self.sparse_topk_total
-
-    @classmethod
-    def from_model_config(cls, hf_config, model_config) -> SparseConfig:
-        """Create SparseConfig from model configuration.
-
-        Args:
-            hf_config: The HuggingFace model config (MiniCPMHybridConfig)
-            model_config: The SGLang model config
-
-        Returns:
-            SparseConfig instance with all parameters set
-        """
-        sparse_topk = hf_config.sparse_topk
-        kernel_size = hf_config.sparse_kernel_size
-        kernel_stride = hf_config.sparse_kernel_stride
-        block_size = hf_config.sparse_block_size
-        window_size = hf_config.sparse_window_size
-        dense_len = hf_config.sparse_dense_len
-
-        head_dim = model_config.head_dim
-        num_kv_heads = model_config.num_key_value_heads
-        head_group_num = model_config.num_key_value_heads
-
-        k1_kernel_size = kernel_size
-        k1_kernel_stride = kernel_stride
-        k2_kernel_size = kernel_size * 4
-        k2_kernel_stride = kernel_stride * 4
-
-        return cls(
-            sparse_len=dense_len,
-            sparse_topk=sparse_topk,
-            kernel_size=kernel_size,
-            kernel_stride=kernel_stride,
-            block_size=block_size,
-            window_size=window_size,
-            dense_len=dense_len,
-            head_dim=head_dim,
-            num_kv_heads=num_kv_heads,
-            head_group_num=head_group_num,
-            k1_kernel_size=k1_kernel_size,
-            k1_kernel_stride=k1_kernel_stride,
-            k2_kernel_size=k2_kernel_size,
-            k2_kernel_stride=k2_kernel_stride,
-        )
-
-
-class SparseBatchAnalyzer:
-    """Analyzer for identifying batches that need sparse attention.
-
-    This helper class analyzes a forward batch and identifies which
-    batches (requests) have sequences long enough to trigger sparse
-    attention processing.
-
-    A batch is considered sparse if its sequence length is >= dense_len.
-    """
-
-    def __init__(self, config: SparseConfig):
-        """Initialize SparseBatchAnalyzer with sparse configuration.
-
-        Args:
-            config: SparseConfig containing dense_len threshold
-        """
-        self.config = config
-
-    def identify_sparse_batches(
-        self, forward_batch: ForwardBatch, minicpm_dense_as_sparse: bool
-    ) -> list[int]:
-        """Identify sparse batches in the forward batch.
-
-        A batch is considered sparse if its sequence length is >= dense_len.
-
-        Args:
-            forward_batch: The forward batch to analyze
-            minicpm_dense_as_sparse: Whether to treat dense batches as sparse
-
-        Returns:
-            List of batch indices that need sparse attention processing.
-            For example: [0, 2, 5] means batches 0, 2, and 5 are sparse.
-        """
-        sparse_bs_list = []
-        batch_size = forward_batch.batch_size
-
-        for i in range(batch_size):
-            # Check if sequence length exceeds dense_len threshold
-            if (
-                forward_batch.seq_lens_cpu[i] >= self.config.dense_len
-                or minicpm_dense_as_sparse
-            ):
-                sparse_bs_list.append(i)
-
-        return sparse_bs_list
-
-
 class SparseMetadataBuilder:
     """Builder for constructing sparse attention metadata.
 
     This helper class builds the metadata required for sparse attention processing,
     including sequence lengths, token mappings, and page tables.
 
-    The metadata is computed from the forward batch and batch indices identified
-    by SparseBatchAnalyzer as needing sparse attention.
+    The metadata is computed from the forward batch and sparse batch indices.
     """
-
-    def __init__(
-        self, config: SparseConfig, num_kv_heads: int, max_context_len: int = 32768
-    ):
-        """Initialize SparseMetadataBuilder with sparse configuration.
-
-        Args:
-            config: SparseConfig containing kernel parameters, head_dim, etc.
-            num_kv_heads: Number of key-value heads.
-            max_context_len: Maximum context length for the model. Default is 32768.
-        """
-        self.config = config
-        self.num_kv_heads = num_kv_heads
 
     def build_sequence_lengths(
         self,
@@ -1306,8 +1153,6 @@ class SparseMetadataBuilder:
 
         return {
             "sparse_bs": sparse_bs,
-            "seqlens_q_sparse_bs": seqlens_q_sparse_bs,
-            "seqlens_k_sparse_bs": seqlens_k_sparse_bs,
             "k1_lens": k1_lens,
             "k2_lens": k2_lens,
             "cu_seqlens_q": cu_seqlens_q_sparse,
@@ -1352,8 +1197,6 @@ class SparseMetadataBuilder:
 
 __all__ = [
     "CompressionLevelMetadata",
-    "SparseConfig",
-    "SparseBatchAnalyzer",
     "SparseMetadataBuilder",
     "batched_gather",
     "get_compress_k_v2",

@@ -38,8 +38,6 @@ from sglang.srt.layers.attention.minicpm.fuse_kernel import (
 )
 from sglang.srt.layers.attention.minicpm.sparse_utils import (
     CompressionLevelMetadata,
-    SparseBatchAnalyzer,
-    SparseConfig,
     SparseMetadataBuilder,
     allocate_and_compress_keys,
     compressed_attention,
@@ -183,16 +181,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 "attention_backend='minicpm_flashattn' or 'minicpm_flashinfer'."
             )
 
-        # Initialize sparse attention helpers (required for MiniCPM)
-        sparse_config = SparseConfig.from_model_config(
-            hf_config, model_runner.model_config
-        )
-        self.sparse_batch_analyzer = SparseBatchAnalyzer(sparse_config)
-        self.sparse_metadata_builder = SparseMetadataBuilder(
-            sparse_config,
-            num_kv_heads=self.num_kv_heads,
-            max_context_len=self.max_context_len,
-        )
+        self.sparse_metadata_builder = SparseMetadataBuilder()
 
         self.flashinfer_backend = None
         if self.use_flashinfer:
@@ -283,11 +272,11 @@ class MiniCPMSparseBackend(AttentionBackend):
         metadata.k2 = compression_metadata["k2"]
 
         if forward_batch.forward_mode.is_extend_or_draft_extend_or_mixed():
-            metadata.sparse_bs_list = (
-                self.sparse_batch_analyzer.identify_sparse_batches(
-                    forward_batch, self.minicpm_dense_as_sparse
-                )
-            )
+            metadata.sparse_bs_list = [
+                i
+                for i in range(forward_batch.batch_size)
+                if forward_batch.seq_lens_cpu[i] >= self.dense_len
+            ]
 
             seqlen_q_sparse_bs, metadata.seqlen_k_sparse_bs_tensor = (
                 self.sparse_metadata_builder.build_sequence_lengths(
@@ -649,8 +638,6 @@ class MiniCPMSparseBackend(AttentionBackend):
             )
 
             sparse_bs = topk_metadata["sparse_bs"]
-            topk_metadata["seqlens_q_sparse_bs"]
-            topk_metadata["seqlens_k_sparse_bs"]
             k1_lens = topk_metadata["k1_lens"]
             k2_lens = topk_metadata["k2_lens"]
 

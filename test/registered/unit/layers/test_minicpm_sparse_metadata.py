@@ -9,7 +9,6 @@ from sglang.srt.layers.attention.minicpm import sparse_utils
 from sglang.srt.layers.attention.minicpm.backend import MiniCPMSparseBackend
 from sglang.srt.layers.attention.minicpm.sparse_utils import (
     CompressionLevelMetadata,
-    SparseConfig,
     SparseMetadataBuilder,
 )
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -17,18 +16,8 @@ from sglang.test.ci.ci_register import register_cpu_ci
 register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 
 
-def _sparse_config():
-    return SparseConfig(
-        sparse_len=8192,
-        sparse_topk=64,
-        kernel_size=32,
-        kernel_stride=16,
-        block_size=64,
-        window_size=2048,
-        dense_len=8192,
-        head_dim=128,
-        num_kv_heads=2,
-        head_group_num=2,
+def _compression_layout():
+    return SimpleNamespace(
         k1_kernel_size=32,
         k1_kernel_stride=16,
         k2_kernel_size=128,
@@ -37,8 +26,11 @@ def _sparse_config():
 
 
 class TestMiniCPMSparseMetadata(unittest.TestCase):
+    def test_builder_does_not_require_unused_configuration(self):
+        SparseMetadataBuilder()
+
     def test_dense_prefill_page_table_covers_total_sequence(self):
-        builder = SparseMetadataBuilder(_sparse_config(), num_kv_heads=2)
+        builder = SparseMetadataBuilder()
         forward_batch = SimpleNamespace(
             batch_size=1,
             seq_lens_cpu=torch.tensor([7000], dtype=torch.int32),
@@ -61,7 +53,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         self.assertEqual(metadata["sparse_page_table"].shape, (2, 7000))
 
     def test_dense_decode_page_table_covers_dense_threshold(self):
-        builder = SparseMetadataBuilder(_sparse_config(), num_kv_heads=2)
+        builder = SparseMetadataBuilder()
         forward_batch = SimpleNamespace(
             batch_size=1,
             seq_lens_cpu=torch.tensor([7000], dtype=torch.int32),
@@ -84,7 +76,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         self.assertEqual(metadata["sparse_page_table"].shape, (2, 8192))
 
     def test_decode_metadata_supports_one_local_head_group(self):
-        builder = SparseMetadataBuilder(_sparse_config(), num_kv_heads=1)
+        builder = SparseMetadataBuilder()
         forward_batch = SimpleNamespace(
             batch_size=1,
             seq_lens_cpu=torch.tensor([10], dtype=torch.int32),
@@ -219,8 +211,8 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         decode.assert_called_once_with(topk=8, batch_size=3)
 
     def test_compression_metadata_ignores_cuda_graph_padding(self):
-        config = _sparse_config()
-        builder = SparseMetadataBuilder(config, num_kv_heads=2)
+        config = _compression_layout()
+        builder = SparseMetadataBuilder()
 
         # The graph was captured for batch size 4, but only the first three
         # requests are real during this replay.
