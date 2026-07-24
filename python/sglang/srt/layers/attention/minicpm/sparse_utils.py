@@ -1064,7 +1064,7 @@ class SparseMetadataBuilder:
                 )
             else:
                 max_sparse_cache_len = max(
-                    max_sparse_cache_len, forward_batch.extend_seq_lens_cpu[i]
+                    max_sparse_cache_len, forward_batch.seq_lens_cpu[i]
                 )
                 sparse_page_table_bs += head_group_num
                 old_bs_to_new_bs_range[i + 1] = (
@@ -1191,7 +1191,7 @@ class SparseMetadataBuilder:
         )
         token_to_bs = torch.arange(0, bs, dtype=torch.int32, device="cuda")
         sparse_page_table = torch.zeros(
-            (2 * bs, sparse_topk * block_size),
+            (head_group_num * bs, max(dense_len, sparse_topk * block_size)),
             dtype=page_table.dtype,
             device=page_table.device,
         )
