@@ -107,6 +107,33 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         self.assertEqual(metadata["sparse_cache_seqlens_int32"].tolist(), [10])
         self.assertEqual(metadata["sparse_page_table"].shape, (1, 8192))
 
+    def test_cuda_graph_page_table_covers_dense_decode(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        backend.base_backend = SimpleNamespace(
+            decode_cuda_graph_metadata={},
+            init_cuda_graph_state=lambda *_: None,
+        )
+        backend.num_sparse_topk_tokens = 6144
+        backend.page_size = 1
+        backend.head_group_num = 2
+        backend.device = "cpu"
+        backend.heads_per_group = 16
+        backend.max_context_len = 256
+        backend.config_dense_len = 8192
+        backend.dense_len = 8192
+        backend.head_dim = 128
+        backend.k1_kernel_size = 32
+        backend.k1_kernel_stride = 16
+        backend.k2_kernel_size = 128
+        backend.k2_kernel_stride = 64
+
+        backend.init_cuda_graph_state(max_bs=1, max_num_tokens=1)
+
+        self.assertEqual(
+            backend.decode_cuda_graph_metadata["sparse_page_table"].shape,
+            (2, 8192),
+        )
+
     def test_compression_uses_configured_k1_k2_layout(self):
         layer = SimpleNamespace(layer_id=0, tp_k_head_num=1, head_dim=1)
         forward_batch = SimpleNamespace(req_pool_indices=[0])

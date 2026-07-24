@@ -1350,7 +1350,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         buffers = self.base_backend.decode_cuda_graph_metadata
         self.decode_cuda_graph_metadata = buffers
         sparse_max_num_pages = (
-            self.num_sparse_topk_tokens + self.page_size - 1
+            max(self.dense_len, self.num_sparse_topk_tokens) + self.page_size - 1
         ) // self.page_size
         buffers.update(
             {
