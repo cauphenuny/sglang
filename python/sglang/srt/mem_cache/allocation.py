@@ -637,5 +637,13 @@ def alloc_for_spec_decode(
             len(reqs),
         )
 
+    req_to_token_pool.alloc_aux_to_lengths(
+        tree_cache=tree_cache,
+        req_pool_indices_cpu=torch.tensor(
+            [req.req_pool_idx for req in reqs], dtype=torch.int64
+        ),
+        seq_lens_cpu=nxt_kv_lens_cpu,
+    )
+
     for i, req in enumerate(reqs):
         req.kv.kv_allocated_len = max(req.kv.kv_allocated_len, int(nxt_kv_lens_cpu[i]))

@@ -42,6 +42,7 @@ class TestPrefillAdder(CustomTestCase):
         tree_cache.disable = False
         tree_cache.inc_lock_ref.return_value = IncLockRefResult()
         tree_cache.dec_lock_ref.return_value = DecLockRefResult()
+        tree_cache.req_to_token_pool.aux_tokens_needed.return_value = 0
         return tree_cache
 
     def create_token_allocator(
@@ -101,6 +102,34 @@ class TestPrefillAdder(CustomTestCase):
         )
         defaults.update(kwargs)
         return PrefillAdder(**defaults)
+
+    def test_prefill_admission_includes_auxiliary_cache_tokens(self):
+        self.mock_token_allocator.available_size.return_value = 10
+        self.mock_tree_cache.req_to_token_pool.aux_tokens_needed.return_value = 2
+        req = self.create_mock_req("aux", priority=0, max_new_tokens=0)
+        req.full_untruncated_fill_ids = [0] * 8
+        req.sampling_params.ignore_eos = False
+        req.host_hit_length = 0
+        req.swa_host_hit_length = 0
+        req.req_pool_idx = None
+        req.mamba_pool_idx = None
+        req.last_node = MagicMock()
+
+        result = self.create_adder(self.create_running_batch()).add_one_req(
+            req, has_chunked_req=False, truncation_align_size=None
+        )
+
+        self.assertEqual(result, AddReqResult.NO_TOKEN)
+
+    def test_running_request_reserves_future_auxiliary_cache_tokens(self):
+        req = self.create_mock_req("running-aux", priority=0, max_new_tokens=8)
+        req.origin_input_ids = [0] * 16
+        req.req_pool_idx = 1
+        self.mock_tree_cache.req_to_token_pool.aux_tokens_needed.return_value = 3
+
+        adder = self.create_adder(self.create_running_batch([req]))
+
+        self.assertEqual(adder.rem_total_token_offset, 11)
 
     def test_preempt_success_high_priority_values_first(self):
         params = [

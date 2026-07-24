@@ -50,6 +50,15 @@ class MiniCPMCompressedCache:
             return 0
         return (length - kernel_size) // (self.kernel_stride * scale) + 1
 
+    def tokens_needed(self, req_pool_idx: int | None, target_seq_len: int) -> int:
+        current = (
+            0
+            if req_pool_idx is None
+            else sum(lengths[req_pool_idx] for lengths in self.allocated_lens)
+        )
+        target = sum(self._sparse_len(target_seq_len, scale) for scale in (1, 4))
+        return max(target - current, 0)
+
     def _allocate_to_lengths(
         self,
         tree_cache: BasePrefixCache,
@@ -128,6 +137,14 @@ class MiniCPMCompressedCache:
             req_pool_indices_cpu,
             seq_lens_cpu + token_per_req,
         )
+
+    def alloc_to_lengths(
+        self,
+        tree_cache: BasePrefixCache,
+        req_pool_indices_cpu: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+    ) -> None:
+        self._allocate_to_lengths(tree_cache, req_pool_indices_cpu, seq_lens_cpu)
 
     def free(self, req_pool_idx: int) -> None:
         allocated = []

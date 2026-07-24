@@ -2533,9 +2533,23 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         if self.spec_algorithm.is_none():
             new_pages = sum(1 for r in requests if r.kv_committed_len % page_size == 0)
-            return new_pages * page_size
+            aux_tokens = sum(
+                self.req_to_token_pool.aux_tokens_needed(
+                    r.req_pool_idx, r.kv_committed_len + 1
+                )
+                for r in requests
+            )
+            return new_pages * page_size + aux_tokens
 
-        return self._new_tokens_required_next_decode_spec_v2(requests, page_size)
+        main_tokens = self._new_tokens_required_next_decode_spec_v2(requests, page_size)
+        reserve = get_alloc_reserve_per_decode()
+        aux_tokens = sum(
+            self.req_to_token_pool.aux_tokens_needed(
+                r.req_pool_idx, r.kv_committed_len + reserve
+            )
+            for r in requests
+        )
+        return main_tokens + aux_tokens
 
     def _new_tokens_required_next_decode_spec_v2(self, requests, page_size):
         """Tight estimate matching eagle_utils.eagle_prepare_for_decode allocation."""

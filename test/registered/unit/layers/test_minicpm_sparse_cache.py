@@ -7,6 +7,7 @@ from sglang.srt.layers.attention.minicpm.cache import (
     attach_compressed_cache,
     create_req_to_token_pool,
 )
+from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -125,6 +126,28 @@ def test_decode_does_not_duplicate_sparse_slots():
     )
     assert available_after_first_decode == 56
     assert allocator.available_size() == available_after_first_decode
+
+
+def test_aux_token_budget_matches_compressed_cache_growth():
+    pool, _, req_pool_idx, _, tree_cache = make_pool_and_req()
+
+    assert pool.aux_tokens_needed(req_pool_idx, target_seq_len=15) == 6
+    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=15)
+    assert pool.aux_tokens_needed(req_pool_idx, target_seq_len=16) == 2
+
+
+def test_decode_budget_includes_compressed_cache_growth():
+    pool, req, req_pool_idx, _, tree_cache = make_pool_and_req()
+    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=15)
+    req.kv_committed_len = 15
+    batch = SimpleNamespace(
+        reqs=[req],
+        req_to_token_pool=pool,
+        token_to_kv_pool_allocator=SimpleNamespace(page_size=1),
+        spec_algorithm=SimpleNamespace(is_none=lambda: True),
+    )
+
+    assert ScheduleBatch.new_tokens_required_next_decode(batch) == 3
 
 
 def test_partial_failure_rolls_back_and_free_releases_every_slot():

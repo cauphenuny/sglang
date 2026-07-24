@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from array import array
 
 from sglang.srt.environ import envs
@@ -554,13 +555,43 @@ class PrefillAdder:
         self.rem_dllm_tokens = max_running_reqs * self.dllm_block_size
 
     def _get_running_request_total_token_offset(self, req: Req) -> int:
-        return (
+        remaining = (
             min(
                 (req.sampling_params.max_new_tokens - len(req.output_ids)),
                 CLIP_MAX_NEW_TOKENS,
             )
             * self.new_token_ratio
         )
+        current_input_len = len(
+            getattr(req, "origin_input_ids", req.full_untruncated_fill_ids)
+        )
+        target_seq_len = current_input_len + len(req.output_ids) + math.ceil(remaining)
+        return remaining + self._aux_tokens_needed(req, target_seq_len)
+
+    def _aux_tokens_needed(self, req: Req, target_seq_len: int) -> int:
+        return self.tree_cache.req_to_token_pool.aux_tokens_needed(
+            getattr(req, "req_pool_idx", None), target_seq_len
+        )
+
+    def _fit_auxiliary_budget(self, req: Req, prefix_len: int, extend_len: int) -> int:
+        """Fit a prefill extension in the shared main-plus-auxiliary token pool."""
+        available = (
+            min(int(self.cur_rem_tokens), int(self.rem_total_tokens)) - self.page_size
+        )
+        if available <= 0:
+            return 0
+
+        low, high = 0, extend_len
+        while low < high:
+            mid = (low + high + 1) // 2
+            needed = self.ceil_paged_tokens(mid) + self._aux_tokens_needed(
+                req, prefix_len + mid
+            )
+            if needed <= available:
+                low = mid
+            else:
+                high = mid - 1
+        return low
 
     @property
     def rem_total_tokens(self):
@@ -689,21 +720,32 @@ class PrefillAdder:
         max_new_tokens: int,
         retracted_stain: bool,
         mamba_gap_reserve: int = 0,
+        req: Optional[Req] = None,
     ):
         # TODO(lsyin): check this workaround logic, which only ensures the prefill will not out of memory, and may be too conservative
         extend_input_len = self.ceil_paged_tokens(extend_input_len)
 
         # alloc_extend reserves an extra page_size per request to make sure the budget doesn't over-commit
         page_overhead = self.page_size
+        aux_now = 0
+        aux_lifetime = 0
+        if req is not None:
+            target_seq_len = len(req.prefix_indices) + extend_input_len
+            aux_now = self._aux_tokens_needed(req, target_seq_len)
+            aux_lifetime = self._aux_tokens_needed(req, target_seq_len + max_new_tokens)
         # `mamba_gap_reserve` (shared Mamba pool only; 0 otherwise) charges the new
         # mamba state's shared-gap cost to BOTH full budgets: the slot is allocated
         # immediately (counts against `cur_rem`) and held for the request lifetime
         # (counts against `rem_total`). See `_mamba_gap_budget_for_req`.
         self.rem_total_token_offset += (
-            extend_input_len + max_new_tokens + page_overhead + mamba_gap_reserve
+            extend_input_len
+            + max_new_tokens
+            + page_overhead
+            + mamba_gap_reserve
+            + aux_lifetime
         )
         self.cur_rem_token_offset += (
-            extend_input_len + page_overhead + mamba_gap_reserve
+            extend_input_len + page_overhead + mamba_gap_reserve + aux_now
         )
         # The new mamba slot also consumes one mamba-recoverable slot (gated
         # separately so full_evictable can't cover it — see __init__).
@@ -758,6 +800,7 @@ class PrefillAdder:
             0,
             req.retracted_stain,
             mamba_gap_reserve=self._mamba_gap_budget_for_req(req),
+            req=req,
         )
 
     def _req_inc_lock_ref(self, req: Req):
@@ -793,6 +836,7 @@ class PrefillAdder:
             max_new_tokens,
             req.retracted_stain,
             mamba_gap_reserve=self._mamba_gap_budget_for_req(req),
+            req=req,
         )
 
         # Return based on remaining token availability
@@ -824,7 +868,12 @@ class PrefillAdder:
             req.prefix_indices
         )
         truncated = cand_extend_input_len > _rem_tokens
-        new_len = min(cand_extend_input_len, _rem_tokens)
+        new_len = self._fit_auxiliary_budget(
+            req,
+            len(req.prefix_indices),
+            min(cand_extend_input_len, _rem_tokens),
+        )
+        truncated = cand_extend_input_len > new_len
         req.set_extend_range(len(req.prefix_indices), len(req.prefix_indices) + new_len)
         self.can_run_list.append(req)
         self._update_prefill_budget(
@@ -837,6 +886,7 @@ class PrefillAdder:
             ),
             req.retracted_stain,
             mamba_gap_reserve=self._mamba_gap_budget_for_req(req),
+            req=req,
         )
 
         # Return if chunked prefill not finished
@@ -864,6 +914,7 @@ class PrefillAdder:
             req.prefix_indices
         )
         paged_input = self.ceil_paged_tokens(cand_extend_input_len)
+        paged_input += self._aux_tokens_needed(req, len(req.full_untruncated_fill_ids))
         # Shared Mamba pool: fold the new mamba state's shared-gap cost into the
         # budget gate so admission can't over-commit (0 for baseline / non-Mamba).
         paged_input += self._mamba_gap_budget_for_req(req)
@@ -881,6 +932,9 @@ class PrefillAdder:
                 r.output_ids
             )
             tokens_occupied = len(r.origin_input_ids) + len(r.output_ids)
+            tokens_left += self._aux_tokens_needed(
+                r, tokens_occupied + math.ceil(tokens_left)
+            )
 
             if tokens_left <= 0:
                 return
@@ -949,14 +1003,19 @@ class PrefillAdder:
                 min(req.sampling_params.max_new_tokens, CLIP_MAX_NEW_TOKENS),
                 req.retracted_stain,
                 mamba_gap_reserve=self._mamba_gap_budget_for_req(req),
+                req=req,
             )
         else:
             if self.rem_chunk_tokens <= 0:
                 return AddReqResult.OTHER
 
             # Chunked prefill
-            trunc_len = self.rem_chunk_tokens
+            trunc_len = self._fit_auxiliary_budget(
+                req, len(req.prefix_indices), self.rem_chunk_tokens
+            )
 
+            if trunc_len <= 0:
+                return AddReqResult.NO_TOKEN
             assert len(req.prefix_indices) == 0
             req.set_extend_range(
                 len(req.prefix_indices), len(req.prefix_indices) + trunc_len
@@ -969,6 +1028,7 @@ class PrefillAdder:
                 0,
                 req.retracted_stain,
                 mamba_gap_reserve=self._mamba_gap_budget_for_req(req),
+                req=req,
             )
 
         return self.budget_state()
@@ -1009,6 +1069,9 @@ class PrefillAdder:
             req.prefix_indices
         )
         total_tokens = cand_extend_input_len + max_new + self.page_size
+        total_tokens += self._aux_tokens_needed(
+            req, len(req.full_untruncated_fill_ids) + max_new
+        )
         # Shared Mamba pool: fold the new mamba state's shared-gap cost into
         # `total_tokens` so both `rem_total_tokens` gates reflect the joint budget.
         total_tokens += self._mamba_gap_budget_for_req(req)
@@ -1103,10 +1166,14 @@ class PrefillAdder:
                     ),
                     req.retracted_stain,
                     mamba_gap_reserve=self._mamba_gap_budget_for_req(req),
+                    req=req,
                 )
             else:
                 # Make sure at least one page is available
                 trunc_len = self.rem_chunk_tokens // self.page_size * self.page_size
+                trunc_len = self._fit_auxiliary_budget(
+                    req, len(req.prefix_indices), trunc_len
+                )
 
                 if trunc_len <= 0:
                     return AddReqResult.OTHER
@@ -1144,6 +1211,7 @@ class PrefillAdder:
                     0,
                     req.retracted_stain,
                     mamba_gap_reserve=self._mamba_gap_budget_for_req(req),
+                    req=req,
                 )
 
         return self.budget_state()
@@ -1181,6 +1249,11 @@ class PrefillAdder:
             len(req.full_untruncated_fill_ids)
             - len(req.prefix_indices)
             + min(req.sampling_params.max_new_tokens, CLIP_MAX_NEW_TOKENS)
+            + self._aux_tokens_needed(
+                req,
+                len(req.full_untruncated_fill_ids)
+                + min(req.sampling_params.max_new_tokens, CLIP_MAX_NEW_TOKENS),
+            )
             - self.rem_total_tokens
         )
         for running_req in sorted_valid_running_reqs:

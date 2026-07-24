@@ -324,6 +324,17 @@ class ReqToTokenPool:
         if self._aux_cache is not None:
             self._aux_cache.alloc_for_decode(**kwargs)
 
+    def alloc_aux_to_lengths(self, **kwargs) -> None:
+        if self._aux_cache is not None:
+            self._aux_cache.alloc_to_lengths(**kwargs)
+
+    def aux_tokens_needed(
+        self, req_pool_idx: Optional[int], target_seq_len: int
+    ) -> int:
+        if self._aux_cache is None:
+            return 0
+        return self._aux_cache.tokens_needed(req_pool_idx, target_seq_len)
+
 
 class MambaPool:
     # Axis of each two-dimensional conv state that represents the sliding window.
