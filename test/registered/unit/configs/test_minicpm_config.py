@@ -20,6 +20,9 @@ register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 def test_minicpm_lightning_config_defaults_are_complete():
     config = MiniCPMHybridConfig()
 
+    assert config.scale_emb == 12
+    assert config.scale_depth == 1.4
+    assert config.dim_model_base == 256
     assert config.lightning_use_rope is True
     assert config.use_output_gate is False
     assert config.attention_bias is False

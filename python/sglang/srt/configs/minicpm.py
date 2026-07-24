@@ -40,6 +40,9 @@ class MiniCPMHybridConfig(PretrainedConfig):
         max_position_embeddings=32768,
         rope_theta=10000.0,
         rope_scaling=None,
+        scale_emb=12,
+        scale_depth=1.4,
+        dim_model_base=256,
         # MiniCPM-specific hybrid config fields
         mixer_types=None,
         minicpm4=None,
@@ -79,6 +82,9 @@ class MiniCPMHybridConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
+        self.scale_emb = scale_emb
+        self.scale_depth = scale_depth
+        self.dim_model_base = dim_model_base
         self.hidden_act = hidden_act
         self.intermediate_size = intermediate_size
         self.initializer_range = initializer_range
