@@ -1193,13 +1193,3 @@ class SparseMetadataBuilder:
             "max_seqlen_q": max_seqlen_in_batch_q,
             "max_seqlen_k": max_seqlen_in_batch_k,
         }
-
-
-__all__ = [
-    "CompressionLevelMetadata",
-    "SparseMetadataBuilder",
-    "batched_gather",
-    "get_compress_k_v2",
-    "allocate_and_compress_keys",
-    "compressed_attention",
-]

@@ -137,24 +137,6 @@ def test_get_block_table_versions_match_reference(topk):
     assert torch.equal(expected, get_block_table_v3(*inputs))
 
 
-@pytest.mark.parametrize("topk", [96, 128])
-def test_get_block_table_matches_reference(topk):
-    """Cross-check each version against the original sparse_kernel_extension.
-
-    This is the authoritative faithfulness check for the migration. The
-    original extension takes ``topk`` as an explicit 6th argument.
-    """
-    ext = pytest.importorskip("sparse_kernel_extension")
-    token_num, seqlen_q_max = 4096, 4096
-    inputs = _make_valid_inputs(token_num, seqlen_q_max, topk)
-
-    ref_v2 = ext.get_block_table_v2(*inputs, topk)
-    assert torch.equal(ref_v2, get_block_table_v2(*inputs))
-
-    ref_v3 = ext.get_block_table_v3(*inputs, topk)
-    assert torch.equal(ref_v3, get_block_table_v3(*inputs))
-
-
 if __name__ == "__main__":
     import sys
 

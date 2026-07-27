@@ -91,7 +91,7 @@ class MiniCPMHybridConfig(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
         # Hybrid config fields
-        self.mixer_types = mixer_types if mixer_types is not None else None
+        self.mixer_types = mixer_types
         self.minicpm4 = minicpm4
         self.lightning = lightning
         self.lightning_nh = lightning_nh
@@ -150,14 +150,7 @@ class MiniCPMHybridConfig(PretrainedConfig):
     @property
     def mamba2_cache_params(self):
         """Return linear-attention cache parameters for lightning layers."""
-        if self.mixer_types is None:
-            lightning_layer_ids = []
-        else:
-            lightning_layer_ids = [
-                i
-                for i, mixer_type in enumerate(self.mixer_types)
-                if mixer_type in ["lightning", "lightning_attn", "lightning-attn"]
-            ]
+        lightning_layer_ids = self.lightning_layer_ids
 
         if (
             not lightning_layer_ids
@@ -182,13 +175,11 @@ class MiniCPMHybridConfig(PretrainedConfig):
     def full_attention_layer_ids(self):
         if self.mixer_types is None:
             return list(range(self.num_hidden_layers))
-        else:
-            return [
-                i
-                for i, mixer_type in enumerate(self.mixer_types)
-                if mixer_type
-                in ["minicpm4", "minicpm", "standard", "attention", "attn"]
-            ]
+        return [
+            i
+            for i, mixer_type in enumerate(self.mixer_types)
+            if mixer_type in ["minicpm4", "minicpm", "standard", "attention", "attn"]
+        ]
 
     @property
     def has_minicpm_sparse_attention(self) -> bool:
@@ -208,25 +199,22 @@ class MiniCPMHybridConfig(PretrainedConfig):
     @property
     def sparse_layer_ids(self) -> list:
         """Get the indices of layers with sparse attention."""
-        if self.has_sparse_config:
-            if self.mixer_types is None:
-                return list(range(self.num_hidden_layers))
-            else:
-                return [i for i, mt in enumerate(self.mixer_types) if mt == "minicpm4"]
-        else:
+        if not self.has_sparse_config:
             return []
+        if self.mixer_types is None:
+            return list(range(self.num_hidden_layers))
+        return [i for i, mt in enumerate(self.mixer_types) if mt == "minicpm4"]
 
     @property
     def lightning_layer_ids(self) -> list:
         """Get the indices of layers with lightning attention."""
         if self.mixer_types is None:
             return []
-        else:
-            return [
-                i
-                for i, mt in enumerate(self.mixer_types)
-                if mt in ["lightning", "lightning_attn", "lightning-attn"]
-            ]
+        return [
+            i
+            for i, mt in enumerate(self.mixer_types)
+            if mt in ["lightning", "lightning_attn", "lightning-attn"]
+        ]
 
 
 register_linear_attn_model(

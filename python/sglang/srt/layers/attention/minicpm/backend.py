@@ -94,8 +94,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 "MiniCPM model must have sparse attention enabled. "
                 "Please ensure the model config has MiniCPM sparse attention enabled."
             )
-        self.has_minicpm_sparse_attention = True
-
         self.kernel_size = hf_config.sparse_kernel_size
         self.kernel_stride = hf_config.sparse_kernel_stride
         attach_compressed_cache(
@@ -115,7 +113,6 @@ class MiniCPMSparseBackend(AttentionBackend):
         )
         self.config_dense_len = hf_config.sparse_dense_len
         topk = hf_config.sparse_topk
-        self.use_nope = hf_config.sparse_use_nope
         self.local_blocks = self.window_size // self.block_size  # local_blocks
         self.sparse_topk = topk + (self.window_size // self.block_size)
         self.num_sparse_topk_tokens = self.block_size * self.sparse_topk
@@ -227,7 +224,6 @@ class MiniCPMSparseBackend(AttentionBackend):
             self.flashinfer_active_wrapper = None
             self.flashinfer_active_kv_indptr = None
             self.flashinfer_active_kv_indices = None
-            self.flashinfer_active_kv_last_page_len = None
             self.flashinfer_active_rows = None
             self.flashinfer_prefill_planned = False
             self.flashinfer_num_qo_heads = self.heads_per_group
@@ -498,7 +494,6 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.flashinfer_active_wrapper = wrapper
         self.flashinfer_active_kv_indptr = kv_indptr
         self.flashinfer_active_kv_indices = kv_indices
-        self.flashinfer_active_kv_last_page_len = kv_last_page_len
         self.flashinfer_active_rows = rows
 
     def _forward_flashinfer(

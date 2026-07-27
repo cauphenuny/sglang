@@ -73,7 +73,8 @@ class MiniCPMMLP(nn.Module):
         )
         if hidden_act != "silu":
             raise ValueError(
-                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+                f"Unsupported activation: {hidden_act}. "
+                "Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
 
@@ -167,8 +168,6 @@ class MiniCPMAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=add_prefix("o_gate", prefix),
             )
-
-        self.layer_id = layer_id
 
     def forward(
         self,

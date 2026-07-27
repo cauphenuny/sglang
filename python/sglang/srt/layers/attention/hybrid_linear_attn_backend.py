@@ -348,9 +348,9 @@ class MambaAttnBackendBase(AttentionBackend):
         return mask.cpu()
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
-        assert max_num_tokens % max_bs == 0, (
-            f"max_num_tokens={max_num_tokens} must be divisible by max_bs={max_bs}"
-        )
+        assert (
+            max_num_tokens % max_bs == 0
+        ), f"max_num_tokens={max_num_tokens} must be divisible by max_bs={max_bs}"
         draft_token_num = max_num_tokens // max_bs
         # Per-bs static write-cursor / force-flush buffers, captured by pointer +
         # refreshed in-place each replay; sized like state_indices_list. None when off.
@@ -405,9 +405,9 @@ class MambaAttnBackendBase(AttentionBackend):
         )
 
     def init_cpu_graph_state(self, max_bs: int, max_num_tokens: int):
-        assert max_num_tokens % max_bs == 0, (
-            f"max_num_tokens={max_num_tokens} must be divisible by max_bs={max_bs}"
-        )
+        assert (
+            max_num_tokens % max_bs == 0
+        ), f"max_num_tokens={max_num_tokens} must be divisible by max_bs={max_bs}"
         for i in range(max_bs):
             self.state_indices_list.append(
                 torch.full(
@@ -693,14 +693,12 @@ class Mamba2AttnBackend(MambaAttnBackendBase):
         )
 
         if model_runner.server_args.enable_mamba_extra_buffer():
-            assert self.conv_states_shape[-1] < self.mamba_chunk_size, (
-                f"{self.conv_states_shape[-1]=} should be less than {self.mamba_chunk_size}"
-            )
+            assert (
+                self.conv_states_shape[-1] < self.mamba_chunk_size
+            ), f"{self.conv_states_shape[-1]=} should be less than {self.mamba_chunk_size}"
             assert (
                 model_runner.server_args.mamba_track_interval >= self.mamba_chunk_size
-            ), (
-                f"mamba_track_interval ({model_runner.server_args.mamba_track_interval}) must be >= mamba_chunk_size ({self.mamba_chunk_size})"
-            )
+            ), f"mamba_track_interval ({model_runner.server_args.mamba_track_interval}) must be >= mamba_chunk_size ({self.mamba_chunk_size})"
 
     def init_forward_metadata_out_graph(
         self,
@@ -1025,7 +1023,9 @@ class HybridLinearAttnBackend(AttentionBackend):
             ]
         )
 
-        mamba_caches = self.linear_attn_backend.req_to_token_pool.get_speculative_mamba2_params_all_layers()
+        mamba_caches = (
+            self.linear_attn_backend.req_to_token_pool.get_speculative_mamba2_params_all_layers()
+        )
 
         conv_states = mamba_caches.conv[0]
         ssm_states = mamba_caches.temporal

@@ -37,7 +37,7 @@ _VERSION_FNS = {
 
 
 def _make_valid_inputs(token_num: int, topk: int, device: str = DEFAULT_DEVICE):
-    """Well-formed inputs (only non-negative block indices) shared by v1/v2/v3.
+    """Well-formed inputs (only non-negative block indices) shared by v2/v3.
 
     ``seqlen_q_max`` is tied to ``token_num`` so the per-token causal position
     (``token_pos_in_bs``) never indexes past ``block_table``.
