@@ -409,6 +409,9 @@ class MiniCPMSparseBackend(AttentionBackend):
         self._use_cuda_graph_buffers = False
         self.base_backend.init_forward_metadata(forward_batch)
         metadata = self.base_backend.forward_metadata
+        if forward_batch.forward_mode.is_idle():
+            self.forward_metadata = metadata
+            return
         self.update_batch_for_sparse(forward_batch, metadata)
         if self.use_flashinfer:
             if forward_batch.forward_mode.is_decode_or_idle():
