@@ -8,9 +8,7 @@ from sglang.srt.configs.minicpm import MiniCPMHybridConfig
 from sglang.srt.layers.attention.linear.lightning_backend import (
     LightningAttentionBackend,
 )
-from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
-    HybridLinearAttnBackend,
-)
+from sglang.srt.models.minicpm import MiniCPMLightningMixer
 from sglang.srt.runtime_context import get_parallel
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -31,16 +29,16 @@ def test_minicpm_lightning_config_defaults_are_complete():
 
 
 def test_minicpm_lightning_idle_batch_returns_empty_output():
-    backend = HybridLinearAttnBackend.__new__(HybridLinearAttnBackend)
-    backend._is_full_attn = lambda *_args: False
+    mixer = MiniCPMLightningMixer.__new__(MiniCPMLightningMixer)
+    torch.nn.Module.__init__(mixer)
+    mixer.hidden_size = 8
     forward_batch = SimpleNamespace(
         forward_mode=SimpleNamespace(is_idle=lambda: True)
     )
-    layer = SimpleNamespace(tp_q_head_num=2, v_head_dim=4)
 
-    output = backend.forward(
-        q=torch.empty(0, 2, 4),
-        layer=layer,
+    output = mixer.forward(
+        positions=torch.empty(0, dtype=torch.int64),
+        hidden_states=torch.empty(0, 4),
         forward_batch=forward_batch,
     )
 

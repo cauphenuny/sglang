@@ -978,10 +978,6 @@ class HybridLinearAttnBackend(AttentionBackend):
 
         if forward_batch.forward_mode.is_idle():
             if is_linear_attn:
-                if mixed_qkv is None:
-                    return q.new_empty(
-                        q.shape[0], layer.tp_q_head_num * layer.v_head_dim
-                    )
                 return mixed_qkv.new_empty(
                     mixed_qkv.shape[0], layer.num_v_heads, layer.head_v_dim
                 )

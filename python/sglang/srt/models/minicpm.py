@@ -323,6 +323,9 @@ class MiniCPMLightningMixer(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        if forward_batch.forward_mode.is_idle():
+            return hidden_states.new_empty(hidden_states.shape[0], self.hidden_size)
+
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
