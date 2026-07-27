@@ -1002,14 +1002,15 @@ class SparseMetadataBuilder:
         )
 
         for b in range(bs):
-            if forward_batch.seq_lens_cpu[b] >= dense_len:
-                if forward_batch.seq_lens_cpu[b] <= sparse_topk * block_size:
-                    sparse_cache_len = forward_batch.seq_lens_cpu[b]
-                elif cache_seqlens[b] % block_size == 0:
+            seq_len = int(forward_batch.seq_lens_cpu[b])
+            if seq_len >= dense_len:
+                if seq_len <= sparse_topk * block_size:
+                    sparse_cache_len = seq_len
+                elif seq_len % block_size == 0:
                     sparse_cache_len = sparse_topk * block_size
                 else:
                     sparse_cache_len = block_size * (sparse_topk - 1) + (
-                        cache_seqlens[b] % block_size
+                        seq_len % block_size
                     )
 
                 if sparse_cache_len > max_sparse_cache_len:
@@ -1019,12 +1020,12 @@ class SparseMetadataBuilder:
                     b * head_group_num : (b + 1) * head_group_num
                 ] = sparse_cache_len
             else:
-                if cache_seqlens[b] > max_sparse_cache_len:
-                    max_sparse_cache_len = cache_seqlens[b]
+                if seq_len > max_sparse_cache_len:
+                    max_sparse_cache_len = seq_len
 
                 sparse_cache_seqlens_cpu[
                     b * head_group_num : (b + 1) * head_group_num
-                ] = cache_seqlens[b]
+                ] = seq_len
 
         sparse_cache_seqlens_int32 = sparse_cache_seqlens_cpu.to(
             device=cache_seqlens.device
@@ -1038,7 +1039,9 @@ class SparseMetadataBuilder:
             dtype=torch.int32,
             device=base_metadata.cu_seqlens_q.device,
         )
-        token_to_bs = torch.arange(0, bs, dtype=torch.int32, device="cuda")
+        token_to_bs = torch.arange(
+            0, bs, dtype=torch.int32, device=page_table.device
+        )
         sparse_page_table = torch.zeros(
             (head_group_num * bs, max(dense_len, sparse_topk * block_size)),
             dtype=page_table.dtype,

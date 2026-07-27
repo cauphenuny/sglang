@@ -188,6 +188,35 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         self.assertEqual(metadata["sparse_cache_seqlens_int32"].tolist(), [10])
         self.assertEqual(metadata["sparse_page_table"].shape, (1, 8192))
 
+    def test_decode_metadata_uses_scheduler_cpu_lengths(self):
+        builder = SparseMetadataBuilder()
+        forward_batch = SimpleNamespace(
+            batch_size=2,
+            seq_lens_cpu=torch.tensor([64, 200], dtype=torch.int32),
+        )
+        base_metadata = SimpleNamespace(
+            cache_seqlens_int32=SimpleNamespace(
+                dtype=torch.int32,
+                device=torch.device("cpu"),
+            ),
+            page_table=torch.empty((2, 200), dtype=torch.int32),
+            cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32),
+        )
+
+        metadata = builder.build_sparse_decode_metadata(
+            forward_batch=forward_batch,
+            base_metadata=base_metadata,
+            head_group_num=2,
+            dense_len=100,
+            sparse_topk=2,
+            block_size=64,
+        )
+
+        self.assertEqual(
+            metadata["sparse_cache_seqlens_int32"].tolist(),
+            [64, 64, 72, 72],
+        )
+
     def test_cuda_graph_page_table_covers_dense_decode(self):
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
         backend.base_backend = SimpleNamespace(
