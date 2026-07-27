@@ -63,6 +63,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             get_num_kv_heads=lambda _tp: 1,
         )
         model_runner = SimpleNamespace(
+            dtype=torch.float16,
             server_args=SimpleNamespace(
                 attention_backend="minicpm_flashattn",
                 disable_cuda_graph=False,
@@ -87,13 +88,35 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             ),
             patch.object(backend_module, "attach_compressed_cache"),
         ):
-            MiniCPMSparseBackend(model_runner)
+            backend = MiniCPMSparseBackend(model_runner)
 
         flash_attention.assert_called_once_with(
             model_runner,
             skip_prefill=False,
             fa_impl_ver=4,
         )
+        self.assertEqual(backend.fused_kernel_kwargs["dtype_str"], "float16")
+        self.assertEqual(backend.fused_kernel_kwargs["kernel_stride"], 16)
+
+        model_runner.server_args.attention_backend = "minicpm_flashinfer"
+        model_config.num_attention_heads = 8
+        with (
+            patch.object(backend_module, "MiniCPMHybridConfig", SimpleNamespace),
+            patch.object(backend_module, "is_blackwell_supported", return_value=True),
+            patch.object(
+                backend_module,
+                "FlashAttentionBackend",
+                return_value=base_backend,
+            ),
+            patch.object(
+                backend_module,
+                "get_parallel",
+                return_value=SimpleNamespace(attn_tp_size=1),
+            ),
+            patch.object(backend_module, "attach_compressed_cache"),
+            self.assertRaisesRegex(ValueError, "16 query heads per KV head"),
+        ):
+            MiniCPMSparseBackend(model_runner)
 
     def test_dense_prefill_page_table_covers_total_sequence(self):
         builder = SparseMetadataBuilder()
@@ -175,6 +198,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         backend.page_size = 1
         backend.head_group_num = 2
         backend.device = "cpu"
+        backend.model_dtype = torch.float16
         backend.heads_per_group = 16
         backend.max_context_len = 256
         backend.config_dense_len = 8192
@@ -190,6 +214,10 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         self.assertEqual(
             backend.decode_cuda_graph_metadata["sparse_page_table"].shape,
             (2, 8192),
+        )
+        self.assertEqual(
+            backend.decode_cuda_graph_metadata["compress_k1"].dtype,
+            torch.float16,
         )
 
     def test_compression_uses_configured_k1_k2_layout(self):

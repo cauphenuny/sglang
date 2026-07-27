@@ -16,10 +16,6 @@ from sglang.jit_kernel.utils import (
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
 
-# Supported compile-time topk values (matches the original VALUE_SPLITS_SWITCH).
-_SUPPORTED_TOPK = (96, 128)
-
-
 @cache_once
 def _get_cccl_include_paths() -> list[str]:
     if is_hip_runtime():
@@ -47,14 +43,18 @@ def _jit_get_block_table_module(
     argument ``kSparseTopK``.
     """
     args = make_cpp_args(topk, head_group_num, block_size)
+    wrappers = [
+        ("get_block_table_v2", f"minicpm_sala::get_block_table_v2<{args}>"),
+    ]
+    if block_size == 64 and topk % 16 == 0:
+        wrappers.append(
+            ("get_block_table_v3", f"minicpm_sala::get_block_table_v3<{args}>")
+        )
     return load_jit(
         f"get_block_table_topk{topk}_g{head_group_num}_b{block_size}",
         *args,
         cuda_files=["minicpm_sala/get_block_table.cuh"],
-        cuda_wrappers=[
-            ("get_block_table_v2", f"minicpm_sala::get_block_table_v2<{args}>"),
-            ("get_block_table_v3", f"minicpm_sala::get_block_table_v3<{args}>"),
-        ],
+        cuda_wrappers=wrappers,
         extra_include_paths=_get_cccl_include_paths(),
     )
 
@@ -75,10 +75,12 @@ def _run(
         )
     token_num = topk_idx.shape[1]
     topk = topk_idx.shape[2]
-    if topk not in _SUPPORTED_TOPK:
+    if topk <= 0 or block_size <= 0:
         raise RuntimeError(
-            f"Unsupported topk={topk}. Supported values: {_SUPPORTED_TOPK}"
+            f"topk and block_size must be positive, got {topk=} and {block_size=}"
         )
+    if version == 3 and (block_size != 64 or topk % 16):
+        version = 2
 
     out = torch.zeros(
         (token_num, head_group_num, topk * block_size),
@@ -123,7 +125,7 @@ def get_block_table_v3(
     head_group_num: int = 2,
     block_size: int = 64,
 ) -> torch.Tensor:
-    """Build the sparse block table (decode-optimized, 1 thread per output)."""
+    """Build the sparse block table with the optimized decode layout when supported."""
     return _run(
         3,
         topk_idx,

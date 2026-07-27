@@ -61,6 +61,7 @@ def _fused_attn_pooling_online_topk(
     block_stride: int = 4,  # pool output block stride
     pad_len: int = 1,  # padding for pool blocks
     num_offs: int = 5,  # number of k positions each pool block reads
+    kernel_stride: int = 16,
     block_size: int = 64,  # block size for q/k block computation
     init_blocks: int = 0,
     local_blocks: int = 0,
@@ -229,11 +230,12 @@ def _fused_attn_pooling_online_topk(
                         orig_seqlen_q = (
                             (q_current_seqlen + cache_len) * block_M
                         ) // m_block_dim
-                        stride = 16
-                        compressed_seqlen_q = (orig_seqlen_q - stride + 1) // stride
+                        compressed_seqlen_q = (
+                            orig_seqlen_q - kernel_stride + 1
+                        ) // kernel_stride
                         offset_row_idx = T.max(
                             0,
-                            (orig_row_idx + 1) // stride
+                            (orig_row_idx + 1) // kernel_stride
                             - 1
                             + k_current_seqlen
                             - compressed_seqlen_q,
@@ -300,11 +302,12 @@ def _fused_attn_pooling_online_topk(
                             orig_seqlen_q = (
                                 (q_current_seqlen + cache_len) * block_M
                             ) // m_block_dim
-                            stride = 16
-                            compressed_seqlen_q = (orig_seqlen_q - stride + 1) // stride
+                            compressed_seqlen_q = (
+                                orig_seqlen_q - kernel_stride + 1
+                            ) // kernel_stride
                             offset_row_idx = T.max(
                                 0,
-                                (orig_row_idx + 1) // stride
+                                (orig_row_idx + 1) // kernel_stride
                                 - 1
                                 + k_current_seqlen
                                 - compressed_seqlen_q,

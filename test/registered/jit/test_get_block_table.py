@@ -41,6 +41,7 @@ def _make_valid_inputs(
     topk,
     batch_size=1,
     head_group=_HEAD_GROUP,
+    block_size=_SPARSE_BLOCK_SIZE,
     device="cuda",
 ):
     """Build well-formed inputs with only non-negative block indices.
@@ -48,7 +49,7 @@ def _make_valid_inputs(
     The original v3 kernel (unlike v1/v2) has no ``sparse_block_idx < 0`` guard,
     so the three variants only provably agree when every topk entry is valid.
     """
-    num_blocks = seqlen_q_max // _SPARSE_BLOCK_SIZE
+    num_blocks = seqlen_q_max // block_size
     torch.manual_seed(0)
     topk_idx = torch.randint(
         0, num_blocks, (head_group, token_num, topk), dtype=torch.int32, device=device
@@ -63,13 +64,18 @@ def _make_valid_inputs(
 
 
 def _get_block_table_reference(
-    topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
+    topk_idx,
+    block_table,
+    token_to_bs,
+    token_pos_in_bs,
+    seqlen_q,
+    block_size=_SPARSE_BLOCK_SIZE,
 ):
     head_group = topk_idx.shape[0]
     token_num = topk_idx.shape[1]
     source = topk_idx.permute(1, 0, 2).unsqueeze(
         -1
-    ) * _SPARSE_BLOCK_SIZE + torch.arange(_SPARSE_BLOCK_SIZE, device=topk_idx.device)
+    ) * block_size + torch.arange(block_size, device=topk_idx.device)
     valid = (source >= 0) & (
         source
         < torch.minimum(seqlen_q[token_to_bs], token_pos_in_bs).view(token_num, 1, 1, 1)
@@ -135,6 +141,21 @@ def test_get_block_table_versions_match_reference(topk):
     expected = _get_block_table_reference(*inputs)
     assert torch.equal(expected, get_block_table_v2(*inputs))
     assert torch.equal(expected, get_block_table_v3(*inputs))
+
+
+@pytest.mark.parametrize(("topk", "block_size"), [(10, 32), (7, 128)])
+def test_get_block_table_supports_configured_layout(topk, block_size):
+    token_num = seqlen_q_max = 256
+    inputs = _make_valid_inputs(
+        token_num,
+        seqlen_q_max,
+        topk,
+        block_size=block_size,
+    )
+    expected = _get_block_table_reference(*inputs, block_size=block_size)
+    kwargs = {"head_group_num": _HEAD_GROUP, "block_size": block_size}
+    assert torch.equal(expected, get_block_table_v2(*inputs, **kwargs))
+    assert torch.equal(expected, get_block_table_v3(*inputs, **kwargs))
 
 
 if __name__ == "__main__":

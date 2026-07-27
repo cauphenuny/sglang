@@ -5,9 +5,7 @@
 // rewritten from the torch::Tensor + pybind interface to the jit_kernel
 // tvm::ffi::TensorView + TensorMatcher/LaunchKernel convention.
 //
-// The compile-time `kSparseTopK` template parameter replaces the original
-// `VALUE_SPLITS_SWITCH(topk, ...)` runtime dispatch: the Python wrapper
-// compiles (and caches) one module per supported topk value (96 / 128).
+// The Python wrapper compiles and caches one module per sparse layout.
 
 #pragma once
 

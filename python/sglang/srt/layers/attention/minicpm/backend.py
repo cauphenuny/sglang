@@ -70,6 +70,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.forward_metadata: Optional[FlashAttentionMetadata] = None
         self.max_context_len = self.base_backend.max_context_len
         self.device = self.base_backend.device
+        self.model_dtype = model_runner.dtype
         self.enable_cuda_graph = not model_runner.server_args.disable_cuda_graph
         self._use_cuda_graph_buffers = False
         self.decode_cuda_graph_metadata = self.base_backend.decode_cuda_graph_metadata
@@ -108,6 +109,19 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.init_blocks = hf_config.sparse_init_blocks
         self.block_size = hf_config.sparse_block_size
         self.window_size = hf_config.sparse_window_size
+        if (
+            self.kernel_stride <= 0
+            or self.kernel_size <= 0
+            or self.block_size <= 0
+            or self.window_size < 0
+            or self.kernel_size % self.kernel_stride
+            or self.block_size % self.kernel_stride
+            or self.window_size % self.block_size
+        ):
+            raise ValueError(
+                "MiniCPM sparse kernel_stride must divide kernel_size and "
+                "block_size, and block_size must divide window_size."
+            )
         self.minicpm_dense_as_sparse = envs.SGLANG_MINICPM_DENSE_AS_SPARSE.get()
         self.dense_len = (
             0 if self.minicpm_dense_as_sparse else hf_config.sparse_dense_len
@@ -130,7 +144,18 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.minicpm_fuse_topk = (
             use_blackwell and self.use_flashinfer
         ) or envs.SGLANG_MINICPM_FUSE_TOPK.get()
+        if self.minicpm_fuse_topk and self.heads_per_group != 16:
+            raise ValueError(
+                "MiniCPM fused top-k currently requires 16 query heads per KV head, "
+                f"got {self.heads_per_group}."
+            )
         self.minicpm_split_stage1 = envs.SGLANG_MINICPM_SPLIT_STAGE1.get()
+        dtype_str = str(self.model_dtype).removeprefix("torch.")
+        if self.minicpm_fuse_topk and dtype_str not in ("bfloat16", "float16"):
+            raise ValueError(
+                "MiniCPM fused top-k only supports bfloat16 and float16, "
+                f"got {self.model_dtype}."
+            )
 
         max_cache_len = self.max_context_len
         pooled_k_len = (max_cache_len + self.block_size - 1) // self.block_size
@@ -163,14 +188,16 @@ class MiniCPMSparseBackend(AttentionBackend):
             "dim": self.head_dim,
             "topk": kernel_topk,
             "pooled_k_len": bucketed_pooled_k_len,
-            "m_block_dim": 16,
+            "m_block_dim": self.heads_per_group,
+            "block_M": self.heads_per_group,
             "block_stride": pooling_block_stride,
             "pad_len": pooling_pad_len,
             "num_offs": pooling_num_offs,
+            "kernel_stride": self.kernel_stride,
             "block_size": self.block_size,
             "init_blocks": self.init_blocks,
             "local_blocks": self.local_blocks,
-            "dtype_str": "bfloat16",
+            "dtype_str": dtype_str,
         }
         self.prefill_kernel_max_seqlen_q_grid = (
             model_runner.server_args.chunked_prefill_size
@@ -573,7 +600,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                         self.head_group_num,
                         self.head_dim,
                     ),
-                    dtype=torch.bfloat16,
+                    dtype=key_states.dtype,
                     device=self.device,
                     fill_value=float("-inf"),
                 )
@@ -585,7 +612,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                         self.head_group_num,
                         self.head_dim,
                     ),
-                    dtype=torch.bfloat16,
+                    dtype=key_states.dtype,
                     device=self.device,
                     fill_value=float("-inf"),
                 )
@@ -770,7 +797,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                     k1_kernel_stride=self.k1_kernel_stride,
                     k2_kernel_size=self.k2_kernel_size,
                     k2_kernel_stride=self.k2_kernel_stride,
-                    dtype=torch.bfloat16,
+                    dtype=query_states.dtype,
                     device=self.device,
                     max_context_length=self.max_context_len,
                     minicpm_split_stage1=self.minicpm_split_stage1,
@@ -1404,7 +1431,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                     self.head_group_num,
                     self.head_dim,
                 ),
-                dtype=torch.bfloat16,
+                dtype=self.model_dtype,
                 device=self.device,
             )
             buffers[f"{name}.table"] = torch.zeros(
