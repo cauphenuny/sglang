@@ -759,7 +759,7 @@ def _minicpm_sala_overrides(server_args: Any, hf_config: Any) -> dict:
         overrides["disable_radix_cache"] = True
     if envs.SGLANG_MINICPM_FORCE_DENSE.get():
         dense_backend = {
-            "minicpm_flashattn": "fa3",
+            "minicpm_flashattn": ("fa4" if is_blackwell_supported() else "fa3"),
             "minicpm_flashinfer": "flashinfer",
         }.get(server_args.attention_backend)
         if dense_backend is not None:

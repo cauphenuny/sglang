@@ -59,8 +59,8 @@ class MiniCPMSparseBackend(AttentionBackend):
         super().__init__()
         attention_backend = model_runner.server_args.attention_backend
         self.use_flashinfer = attention_backend == "minicpm_flashinfer"
-        use_blackwell_flashinfer = self.use_flashinfer and is_blackwell_supported()
-        if use_blackwell_flashinfer:
+        use_blackwell = is_blackwell_supported()
+        if use_blackwell:
             fa_impl_ver = 4
         self.base_backend = FlashAttentionBackend(
             model_runner,
@@ -128,8 +128,8 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.k2_kernel_stride = self.kernel_stride * 4
 
         self.minicpm_fuse_topk = (
-            use_blackwell_flashinfer or envs.SGLANG_MINICPM_FUSE_TOPK.get()
-        )
+            use_blackwell and self.use_flashinfer
+        ) or envs.SGLANG_MINICPM_FUSE_TOPK.get()
         self.minicpm_split_stage1 = envs.SGLANG_MINICPM_SPLIT_STAGE1.get()
 
         max_cache_len = self.max_context_len

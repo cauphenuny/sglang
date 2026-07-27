@@ -29,6 +29,72 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
     def test_builder_does_not_require_unused_configuration(self):
         SparseMetadataBuilder()
 
+    def test_flashattn_variant_uses_fa4_on_blackwell(self):
+        req_pool = SimpleNamespace(
+            req_to_sparse_k1_token=torch.empty(0),
+            req_to_sparse_k2_token=torch.empty(0),
+        )
+        base_backend = SimpleNamespace(
+            max_context_len=256,
+            device="cpu",
+            decode_cuda_graph_metadata={},
+            req_to_token_pool=req_pool,
+            token_to_kv_pool=SimpleNamespace(),
+            kv_cache_dtype=torch.bfloat16,
+            kv_cache_dtype_str="bfloat16",
+            page_size=1,
+            fa_impl_ver=4,
+            num_splits=1,
+        )
+        hf_config = SimpleNamespace(
+            has_minicpm_sparse_attention=True,
+            sparse_kernel_size=32,
+            sparse_kernel_stride=16,
+            sparse_init_blocks=1,
+            sparse_block_size=64,
+            sparse_window_size=64,
+            sparse_dense_len=128,
+            sparse_topk=1,
+        )
+        model_config = SimpleNamespace(
+            hf_config=hf_config,
+            num_attention_heads=16,
+            head_dim=128,
+            get_num_kv_heads=lambda _tp: 1,
+        )
+        model_runner = SimpleNamespace(
+            server_args=SimpleNamespace(
+                attention_backend="minicpm_flashattn",
+                disable_cuda_graph=False,
+                enable_memory_saver=False,
+                chunked_prefill_size=64,
+            ),
+            model_config=model_config,
+        )
+
+        with (
+            patch.object(backend_module, "MiniCPMHybridConfig", SimpleNamespace),
+            patch.object(backend_module, "is_blackwell_supported", return_value=True),
+            patch.object(
+                backend_module,
+                "FlashAttentionBackend",
+                return_value=base_backend,
+            ) as flash_attention,
+            patch.object(
+                backend_module,
+                "get_parallel",
+                return_value=SimpleNamespace(attn_tp_size=1),
+            ),
+            patch.object(backend_module, "attach_compressed_cache"),
+        ):
+            MiniCPMSparseBackend(model_runner)
+
+        flash_attention.assert_called_once_with(
+            model_runner,
+            skip_prefill=False,
+            fa_impl_ver=4,
+        )
+
     def test_dense_prefill_page_table_covers_total_sequence(self):
         builder = SparseMetadataBuilder()
         forward_batch = SimpleNamespace(
