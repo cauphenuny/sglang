@@ -721,7 +721,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 compressed_k2=compressed_k2,
                 compressed_cu_seqlens2=compressed_cu_seqlens2,
                 fused_kernel=self._get_fused_topk_kernel(
-                    forward_batch.batch_size,
+                    len(sparse_bs),
                     is_prefill=True,
                 ),
             )

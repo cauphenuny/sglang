@@ -257,6 +257,64 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
 
         self.assertIs(backend.forward_metadata, metadata)
 
+    def test_mixed_prefill_compiles_fused_topk_for_sparse_batch_only(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        backend.forward_metadata = SimpleNamespace(
+            sparse_batch_size=1,
+            k1=SimpleNamespace(cu_seqlens=torch.tensor([0, 0, 1])),
+            k2=SimpleNamespace(cu_seqlens=torch.tensor([0, 0, 1])),
+        )
+        backend.sparse_metadata_builder = SimpleNamespace(
+            build_prefill_topk_metadata=lambda **_: {
+                "sparse_bs": [1],
+                "k1_lens": torch.tensor([0, 1]),
+                "k2_lens": torch.tensor([0, 1]),
+                "cu_seqlens_q": torch.tensor([0, 1], dtype=torch.int32),
+                "cu_seqlens_k": torch.tensor([0, 1], dtype=torch.int32),
+                "max_seqlen_q": 1,
+                "max_seqlen_k": 1,
+                "query_states": torch.empty(1, 1, 1),
+            }
+        )
+        backend.k1_kernel_size = 1
+        backend.k1_kernel_stride = 1
+        backend.k2_kernel_size = 1
+        backend.k2_kernel_stride = 1
+        backend.dense_len = 1
+        backend.max_context_len = 1
+        backend.minicpm_split_stage1 = False
+        layer = SimpleNamespace(tp_q_head_num=1, tp_k_head_num=1, head_dim=1)
+        forward_batch = SimpleNamespace(batch_size=2)
+
+        with (
+            patch.object(
+                backend_module,
+                "allocate_and_compress_keys",
+                return_value=(torch.ones(1, 1, 1), torch.ones(1, 1, 1)),
+            ),
+            patch.object(
+                backend,
+                "_get_fused_topk_kernel",
+                return_value="sparse-kernel",
+            ) as get_kernel,
+            patch.object(
+                backend,
+                "sparse_get_topk_impl",
+                side_effect=lambda *_args, **kwargs: kwargs["fused_kernel"],
+            ),
+        ):
+            result = backend.get_topk_for_sparse(
+                query_states=torch.empty(2, 1, 1),
+                key_states=torch.empty(2, 1, 1),
+                value_states=None,
+                query_length=None,
+                layer=layer,
+                forward_batch=forward_batch,
+            )
+
+        self.assertEqual(result, "sparse-kernel")
+        get_kernel.assert_called_once_with(1, is_prefill=True)
+
     def test_compression_metadata_ignores_cuda_graph_padding(self):
         config = _compression_layout()
         builder = SparseMetadataBuilder()
