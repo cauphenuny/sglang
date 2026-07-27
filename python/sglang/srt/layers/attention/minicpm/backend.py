@@ -71,6 +71,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.max_context_len = self.base_backend.max_context_len
         self.device = self.base_backend.device
         self.enable_cuda_graph = not model_runner.server_args.disable_cuda_graph
+        self._use_cuda_graph_buffers = False
         self.decode_cuda_graph_metadata = self.base_backend.decode_cuda_graph_metadata
         self.req_to_token_pool = self.base_backend.req_to_token_pool
         self.token_to_kv_pool = self.base_backend.token_to_kv_pool
@@ -405,6 +406,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 "MiniCPM backend does not support speculative decoding (draft extend)"
             )
 
+        self._use_cuda_graph_buffers = False
         self.base_backend.init_forward_metadata(forward_batch)
         metadata = self.base_backend.forward_metadata
         self.update_batch_for_sparse(forward_batch, metadata)
@@ -724,7 +726,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         else:
             metadata = self.forward_metadata
 
-            if self.enable_cuda_graph:
+            if self._use_cuda_graph_buffers:
                 get_compress_k_v2(
                     layer=layer,
                     forward_batch=forward_batch,
@@ -783,7 +785,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             max_seqlen_in_batch_k = topk_metadata["max_seqlen_k"]
             query_states = topk_metadata["query_states"]
 
-            if self.enable_cuda_graph:
+            if self._use_cuda_graph_buffers:
                 ret = self.sparse_get_topk_impl(
                     query_states,
                     cu_seqlens_q,
@@ -1435,6 +1437,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 f"got {forward_batch.forward_mode}"
             )
 
+        self._use_cuda_graph_buffers = True
         self._get_fused_topk_kernel(
             forward_batch.batch_size,
             is_prefill=False,

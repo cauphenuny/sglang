@@ -210,6 +210,32 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         )
         decode.assert_called_once_with(topk=8, batch_size=3)
 
+    def test_forward_metadata_tracks_cuda_graph_buffer_ownership(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        metadata = SimpleNamespace()
+        backend.base_backend = SimpleNamespace(
+            forward_metadata=metadata,
+            init_forward_metadata=lambda *_: None,
+            init_forward_metadata_out_graph=lambda *_: None,
+        )
+        backend.update_batch_for_sparse = lambda *_: None
+        backend._get_fused_topk_kernel = lambda *_args, **_kwargs: None
+        backend._replay_sparse_graph_metadata = lambda *_: None
+        backend.use_flashinfer = False
+        forward_mode = SimpleNamespace(
+            is_target_verify=lambda: False,
+            is_draft_extend_v2=lambda: False,
+            is_decode_or_idle=lambda: True,
+        )
+        forward_batch = SimpleNamespace(forward_mode=forward_mode, batch_size=1)
+
+        backend._use_cuda_graph_buffers = True
+        backend.init_forward_metadata(forward_batch)
+        self.assertFalse(backend._use_cuda_graph_buffers)
+
+        backend.init_forward_metadata_out_graph(forward_batch)
+        self.assertTrue(backend._use_cuda_graph_buffers)
+
     def test_compression_metadata_ignores_cuda_graph_padding(self):
         config = _compression_layout()
         builder = SparseMetadataBuilder()
