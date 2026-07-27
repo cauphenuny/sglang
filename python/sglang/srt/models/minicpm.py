@@ -221,8 +221,7 @@ class MiniCPMLightningMixer(nn.Module):
         rms_norm_eps: float = 1e-6,
         use_output_norm: bool = False,
         qk_norm: bool = True,
-        rope_head_dim: Optional[int] = None,
-        scale: str = "1/sqrt(d)",
+        scale: str | float = "1/sqrt(d)",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -238,26 +237,22 @@ class MiniCPMLightningMixer(nn.Module):
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim
         if scale == "1/sqrt(d)":
-            self.scale = self.head_dim ** (-0.5)
+            scaling = self.head_dim ** (-0.5)
         elif scale == "1/d":
-            self.scale = self.head_dim ** (-1.0)
+            scaling = self.head_dim ** (-1.0)
+        elif isinstance(scale, (int, float)):
+            scaling = float(scale)
         else:
-            self.scale = 1.0
+            scaling = 1.0
         self.use_output_gate = use_output_gate
         self.attention_bias = attention_bias
         self.rms_norm_eps = rms_norm_eps
         self.use_rope = use_rope
         self.qk_norm = qk_norm
         self.use_output_norm = use_output_norm
-        self.rope_head_dim = (
-            rope_head_dim if rope_head_dim is not None else self.head_dim
-        )
-        assert self.rope_head_dim <= self.head_dim
 
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -308,14 +303,12 @@ class MiniCPMLightningMixer(nn.Module):
         self.attn = RadixAttention(
             self.num_heads,
             self.head_dim,
-            self.scale,
+            scaling,
             num_kv_heads=self.num_kv_heads,
             layer_id=layer_id,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
         )
-        self.layer_id = layer_id
-        self.state_shape = (self.num_kv_heads, self.head_dim, self.head_dim)
 
     def forward(
         self,

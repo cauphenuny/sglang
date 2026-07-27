@@ -82,14 +82,6 @@ class LightningAttentionBackend(MambaAttnBackendBase):
             self.device,
             layerwise_decay=getattr(config, "lightning_layerwise_decay", True),
         )
-        head_dim = getattr(
-            config, "lightning_head_dim", model_runner.model_config.head_dim
-        )
-        scale = getattr(config, "lightning_scale", "1/sqrt(d)")
-        self.softmax_scale = {
-            "1/sqrt(d)": head_dim**-0.5,
-            "1/d": head_dim**-1.0,
-        }.get(scale, float(scale) if isinstance(scale, (int, float)) else 1.0)
         self.linear_backend = getattr(config, "linear_backend", "seg_la")
         logger.info(
             f"linear_backend for linear attention in hybrid_linear_backend: {self.linear_backend}"
@@ -283,7 +275,7 @@ class LightningAttentionBackend(MambaAttnBackendBase):
             meta=seg_meta,
             caches=temp_cache,
             cache_indices=intermediate_state_indices,
-            softmax_scale=self.softmax_scale,
+            softmax_scale=layer.scaling,
             decouple=True,
         )
         return hidden

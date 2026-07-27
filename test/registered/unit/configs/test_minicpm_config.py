@@ -69,3 +69,37 @@ def test_minicpm_lightning_reuses_shared_backend_and_cache_shape():
         )
     assert len(slopes) == 2
     assert slopes[0].equal(slopes[1])
+
+
+def test_lightning_backend_uses_layer_scale(monkeypatch):
+    captured = {}
+
+    def fake_seg_la_fwd(**kwargs):
+        captured.update(kwargs)
+        return kwargs["q"]
+
+    monkeypatch.setattr(
+        "sglang.srt.layers.attention.linear.lightning_backend.seg_la_fwd",
+        fake_seg_la_fwd,
+    )
+    backend = LightningAttentionBackend.__new__(LightningAttentionBackend)
+    backend.tp_slope = [torch.ones(1, 1, 1)]
+    layer = SimpleNamespace(layer_id=0, scaling=0.25)
+    metadata = SimpleNamespace(
+        batch_size=1,
+        query_start_loc=torch.tensor([0, 1]),
+        has_initial_states=torch.tensor([False]),
+    )
+    q = torch.ones(1, 1, 1)
+
+    backend._linear_attention_entry(
+        q=q,
+        k=q,
+        v=q,
+        kv_cache=torch.zeros(1, 1, 1, 1),
+        state_indices_tensor=torch.tensor([0]),
+        metadata=metadata,
+        layer=layer,
+    )
+
+    assert captured["softmax_scale"] == 0.25
