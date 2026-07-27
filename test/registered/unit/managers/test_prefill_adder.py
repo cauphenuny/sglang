@@ -131,6 +131,23 @@ class TestPrefillAdder(CustomTestCase):
 
         self.assertEqual(adder.rem_total_token_offset, 11)
 
+    def test_zero_auxiliary_cost_preserves_chunk_size(self):
+        self.mock_token_allocator.available_size.return_value = 8
+        req = self.create_mock_req("stock", priority=0, max_new_tokens=0)
+        req.full_untruncated_fill_ids = list(range(8))
+        req.extend_range = Range(0, 0)
+        req.set_extend_range.side_effect = lambda start, end: setattr(
+            req, "extend_range", Range(start, end)
+        )
+
+        adder = self.create_adder(
+            self.create_running_batch(),
+            rem_chunk_tokens=8,
+        )
+        adder.add_chunked_req(req)
+
+        self.assertEqual(req.extend_range.length, 8)
+
     def test_preempt_success_high_priority_values_first(self):
         params = [
             ("run1", 0, 50),

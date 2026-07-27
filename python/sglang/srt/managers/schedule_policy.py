@@ -575,6 +575,9 @@ class PrefillAdder:
 
     def _fit_auxiliary_budget(self, req: Req, prefix_len: int, extend_len: int) -> int:
         """Fit a prefill extension in the shared main-plus-auxiliary token pool."""
+        if self._aux_tokens_needed(req, prefix_len + extend_len) == 0:
+            return extend_len
+
         available = (
             min(int(self.cur_rem_tokens), int(self.rem_total_tokens)) - self.page_size
         )
