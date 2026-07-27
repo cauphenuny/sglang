@@ -288,7 +288,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             )
 
         self.assertEqual(
-            [(call.args[14], call.args[15]) for call in compress.call_args_list],
+            [(call.args[8], call.args[9]) for call in compress.call_args_list],
             [(5, 3), (13, 7)],
         )
         self.assertTrue(all(call.kwargs["padded"] for call in compress.call_args_list))
