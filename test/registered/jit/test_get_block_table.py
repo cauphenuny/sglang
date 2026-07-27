@@ -44,11 +44,7 @@ def _make_valid_inputs(
     block_size=_SPARSE_BLOCK_SIZE,
     device="cuda",
 ):
-    """Build well-formed inputs with only non-negative block indices.
-
-    The original v3 kernel (unlike v1/v2) has no ``sparse_block_idx < 0`` guard,
-    so the three variants only provably agree when every topk entry is valid.
-    """
+    """Build inputs with only non-negative block indices."""
     num_blocks = seqlen_q_max // block_size
     torch.manual_seed(0)
     topk_idx = torch.randint(
@@ -131,13 +127,9 @@ def test_get_block_table_v2_golden(topk):
 
 @pytest.mark.parametrize("topk", [96, 128])
 def test_get_block_table_versions_match_reference(topk):
-    """The prefill and decode kernels match the Torch reference.
-
-    Inputs contain only non-negative block indices because v3 assumes valid
-    top-k output.
-    """
+    """The prefill and decode kernels match the Torch reference, including -1."""
     token_num, seqlen_q_max = 2048, 2048
-    inputs = _make_valid_inputs(token_num, seqlen_q_max, topk)
+    inputs = _make_inputs(token_num, seqlen_q_max, topk)
     expected = _get_block_table_reference(*inputs)
     assert torch.equal(expected, get_block_table_v2(*inputs))
     assert torch.equal(expected, get_block_table_v3(*inputs))

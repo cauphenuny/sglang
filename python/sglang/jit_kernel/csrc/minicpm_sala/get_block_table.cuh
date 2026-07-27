@@ -104,6 +104,10 @@ __global__ void get_block_table_cuda_v3(
   const int token_idx_dst = token_idx * kHeadGroup * kSparseTopK * kSparseBlockSize +
                             head_group_idx * kSparseTopK * kSparseBlockSize + topk_idx_in_head * kSparseBlockSize +
                             tidx % kSparseBlockSize;
+  if (sparse_block_idx < 0) {
+    out_block_table[token_idx_dst] = 0;
+    return;
+  }
 
   const int bs = token_to_bs[token_idx];
   const int pos_in_bs = token_pos_in_bs[token_idx];
