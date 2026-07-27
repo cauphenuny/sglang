@@ -238,8 +238,5 @@ register_linear_attn_model(
         arch_names=["MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"],
         uses_mamba_radix_cache=True,
         support_mamba_cache=True,
-        req_to_token_pool_factory_name=(
-            "sglang.srt.layers.attention.minicpm.cache.create_req_to_token_pool"
-        ),
     )
 )

@@ -10,7 +10,6 @@ from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
-    from sglang.srt.mem_cache.kv_cache_configurator import KVCacheConfigurator
     from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 
 
@@ -180,6 +179,9 @@ def attach_compressed_cache(
     kernel_stride: int,
     enable_memory_saver: bool,
 ) -> ReqToTokenPool:
+    if isinstance(pool._aux_cache, MiniCPMCompressedCache):
+        return pool
+
     pool.attach_aux_cache(
         MiniCPMCompressedCache(
             pool,
@@ -189,37 +191,3 @@ def attach_compressed_cache(
         )
     )
     return pool
-
-
-def create_req_to_token_pool(
-    *,
-    configurator: KVCacheConfigurator,
-    size: int,
-    max_context_len: int,
-    enable_memory_saver: bool,
-):
-    config = configurator.model_config.hf_config
-    sparse = config.has_minicpm_sparse_attention and (
-        configurator.server_args.attention_backend
-        in ("minicpm_flashattn", "minicpm_flashinfer")
-    )
-    cache_params = config.mamba2_cache_params
-    extra_max_context_len = max_context_len - configurator.model_config.context_len
-    if cache_params is None:
-        pool = configurator._build_default_req_pool(
-            max_num_reqs=size,
-            extra_max_context_len=extra_max_context_len,
-        )
-    else:
-        pool = configurator._build_hybrid_req_pool(
-            max_num_reqs=size,
-            extra_max_context_len=extra_max_context_len,
-        )
-    if not sparse:
-        return pool
-    return attach_compressed_cache(
-        pool,
-        kernel_size=config.sparse_kernel_size,
-        kernel_stride=config.sparse_kernel_stride,
-        enable_memory_saver=enable_memory_saver,
-    )

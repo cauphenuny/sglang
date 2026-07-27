@@ -5,7 +5,6 @@ import torch
 
 from sglang.srt.layers.attention.minicpm.cache import (
     attach_compressed_cache,
-    create_req_to_token_pool,
 )
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
@@ -167,30 +166,28 @@ def test_partial_failure_rolls_back_and_free_releases_every_slot():
     assert allocator.available_size() == 8
 
 
-def test_stock_backend_skips_compressed_cache():
+def test_attach_compressed_cache_is_idempotent():
     pool = ReqToTokenPool(
         size=2,
         max_context_len=64,
         device="cpu",
         enable_memory_saver=False,
     )
-    hf_config = SimpleNamespace(
-        has_minicpm_sparse_attention=True,
-        mamba2_cache_params=None,
-        sparse_kernel_size=4,
-        sparse_kernel_stride=2,
+    attach_compressed_cache(
+        pool,
+        kernel_size=4,
+        kernel_stride=2,
+        enable_memory_saver=False,
     )
-    configurator = SimpleNamespace(
-        model_config=SimpleNamespace(hf_config=hf_config, context_len=64),
-        server_args=SimpleNamespace(attention_backend="flashinfer"),
-        _build_default_req_pool=lambda **_: pool,
-    )
-    result = create_req_to_token_pool(
-        configurator=configurator,
-        size=2,
-        max_context_len=64,
+    cache = pool._aux_cache
+    k1_table = pool.req_to_sparse_k1_token
+
+    attach_compressed_cache(
+        pool,
+        kernel_size=4,
+        kernel_stride=2,
         enable_memory_saver=False,
     )
 
-    assert result is pool
-    assert not hasattr(pool, "req_to_sparse_k1_token")
+    assert pool._aux_cache is cache
+    assert pool.req_to_sparse_k1_token is k1_table

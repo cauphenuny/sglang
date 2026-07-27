@@ -15,6 +15,7 @@ from sglang.srt.layers.attention.flashattention_backend import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
 )
+from sglang.srt.layers.attention.minicpm.cache import attach_compressed_cache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import is_blackwell_supported, is_flashinfer_available
@@ -73,12 +74,6 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.decode_cuda_graph_metadata = self.base_backend.decode_cuda_graph_metadata
         self.req_to_token_pool = self.base_backend.req_to_token_pool
         self.token_to_kv_pool = self.base_backend.token_to_kv_pool
-        self.req_to_sparse_k1_token = (
-            model_runner.req_to_token_pool.req_to_sparse_k1_token
-        )
-        self.req_to_sparse_k2_token = (
-            model_runner.req_to_token_pool.req_to_sparse_k2_token
-        )
         self.kv_cache_dtype = self.base_backend.kv_cache_dtype
         self.kv_cache_dtype_str = self.base_backend.kv_cache_dtype_str
         self.page_size = self.base_backend.page_size
@@ -103,6 +98,14 @@ class MiniCPMSparseBackend(AttentionBackend):
 
         self.kernel_size = hf_config.sparse_kernel_size
         self.kernel_stride = hf_config.sparse_kernel_stride
+        attach_compressed_cache(
+            self.req_to_token_pool,
+            kernel_size=self.kernel_size,
+            kernel_stride=self.kernel_stride,
+            enable_memory_saver=model_runner.server_args.enable_memory_saver,
+        )
+        self.req_to_sparse_k1_token = self.req_to_token_pool.req_to_sparse_k1_token
+        self.req_to_sparse_k2_token = self.req_to_token_pool.req_to_sparse_k2_token
         self.init_blocks = hf_config.sparse_init_blocks
         self.block_size = hf_config.sparse_block_size
         self.window_size = hf_config.sparse_window_size
