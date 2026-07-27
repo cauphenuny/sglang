@@ -137,14 +137,6 @@ class MiniCPMCompressedCache:
             seq_lens_cpu + token_per_req,
         )
 
-    def alloc_to_lengths(
-        self,
-        tree_cache: BasePrefixCache,
-        req_pool_indices_cpu: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
-    ) -> None:
-        self._allocate_to_lengths(tree_cache, req_pool_indices_cpu, seq_lens_cpu)
-
     def free(self, req_pool_idx: int) -> None:
         allocated = []
         for table, lengths in zip(

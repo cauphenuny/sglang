@@ -149,6 +149,23 @@ def test_decode_budget_includes_compressed_cache_growth():
     assert ScheduleBatch.new_tokens_required_next_decode(batch) == 3
 
 
+def test_spec_decode_uses_stock_budget_without_auxiliary_cache():
+    req = SimpleNamespace(kv_committed_len=15, req_pool_idx=1)
+    batch = SimpleNamespace(
+        reqs=[req],
+        req_to_token_pool=SimpleNamespace(
+            aux_tokens_needed=lambda *_: pytest.fail(
+                "speculative decode must not reserve MiniCPM auxiliary cache"
+            )
+        ),
+        token_to_kv_pool_allocator=SimpleNamespace(page_size=1),
+        spec_algorithm=SimpleNamespace(is_none=lambda: False),
+        _new_tokens_required_next_decode_spec_v2=lambda *_: 5,
+    )
+
+    assert ScheduleBatch.new_tokens_required_next_decode(batch) == 5
+
+
 def test_partial_failure_rolls_back_and_free_releases_every_slot():
     pool, req, req_pool_idx, allocator, tree_cache = make_pool_and_req(capacity=7)
 
