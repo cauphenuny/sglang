@@ -148,6 +148,54 @@ class TestPrefillAdder(CustomTestCase):
 
         self.assertEqual(req.extend_range.length, 8)
 
+    def test_auxiliary_cost_limits_chunk_size(self):
+        self.mock_token_allocator.available_size.return_value = 10
+        self.mock_tree_cache.req_to_token_pool.aux_tokens_needed.side_effect = (
+            lambda _req_pool_idx, target_seq_len: target_seq_len // 2
+        )
+        req = self.create_mock_req("aux-chunk", priority=0, max_new_tokens=0)
+        req.full_untruncated_fill_ids = list(range(8))
+        req.req_pool_idx = None
+        req.extend_range = Range(0, 0)
+        req.set_extend_range.side_effect = lambda start, end: setattr(
+            req, "extend_range", Range(start, end)
+        )
+
+        adder = self.create_adder(
+            self.create_running_batch(),
+            rem_chunk_tokens=8,
+        )
+        chunked_req = adder.add_chunked_req(req)
+
+        self.assertIs(chunked_req, req)
+        self.assertEqual(req.extend_range.length, 6)
+
+    def test_preemption_counts_auxiliary_cost_for_both_requests(self):
+        running_reqs = [
+            self.create_mock_req("run1", priority=0, max_new_tokens=10),
+            self.create_mock_req("run2", priority=0, max_new_tokens=10),
+        ]
+        for req_pool_idx, req in enumerate(running_reqs, start=1):
+            req.origin_input_ids = []
+            req.req_pool_idx = req_pool_idx
+        self.mock_tree_cache.req_to_token_pool.aux_tokens_needed.side_effect = (
+            lambda req_pool_idx, _target_seq_len: 10 if req_pool_idx is None else 5
+        )
+        running_batch = self.create_running_batch(running_reqs)
+        adder = self.create_adder(running_batch)
+        self.mock_token_allocator.available_size.return_value = 40
+        new_req = self.create_mock_req("new", priority=1, max_new_tokens=20)
+        new_req.req_pool_idx = None
+
+        success = adder.preempt_to_schedule(
+            new_req,
+            self.create_server_args(schedule_low_priority_values_first=False),
+        )
+
+        self.assertTrue(success)
+        self.assertEqual(set(adder.preempt_list), set(running_reqs))
+        self.assertEqual(running_batch.release_req.call_count, 2)
+
     def test_preempt_success_high_priority_values_first(self):
         params = [
             ("run1", 0, 50),
