@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from sglang.srt.configs.linear_attn_model_registry import get_linear_attn_config
@@ -26,6 +27,69 @@ def test_minicpm_lightning_config_defaults_are_complete():
     assert config.attention_bias is False
     assert config.use_output_norm is False
     assert config.qk_norm is True
+
+
+def test_minicpm_empty_mixer_types_default_to_full_attention():
+    config = MiniCPMHybridConfig(num_hidden_layers=3, mixer_types=[])
+
+    assert config.mixer_types == ["minicpm4", "minicpm4", "minicpm4"]
+    assert config.full_attention_layer_ids == [0, 1, 2]
+
+
+def test_minicpm_short_mixer_pattern_repeats_to_layer_count():
+    config = MiniCPMHybridConfig(
+        num_hidden_layers=5,
+        mixer_types=["minicpm4", "lightning-attn"],
+    )
+
+    assert config.mixer_types == [
+        "minicpm4",
+        "lightning-attn",
+        "minicpm4",
+        "lightning-attn",
+        "minicpm4",
+    ]
+    assert config.full_attention_layer_ids == [0, 2, 4]
+    assert config.lightning_layer_ids == [1, 3]
+
+
+def test_minicpm_mixer_aliases_are_canonicalized():
+    config = MiniCPMHybridConfig(
+        num_hidden_layers=4,
+        mixer_types=["attention", "lightning_attn"],
+    )
+
+    assert config.mixer_types == [
+        "minicpm4",
+        "lightning-attn",
+        "minicpm4",
+        "lightning-attn",
+    ]
+
+
+def test_minicpm_rejects_more_mixer_types_than_layers():
+    with pytest.raises(ValueError, match="Invalid number of mixer types: 3"):
+        MiniCPMHybridConfig(
+            num_hidden_layers=2,
+            mixer_types=["minicpm4", "lightning", "minicpm4"],
+        )
+
+
+def test_minicpm_lightning_dimensions_fall_back_to_base_attention():
+    config = MiniCPMHybridConfig(
+        hidden_size=96,
+        num_attention_heads=6,
+        num_key_value_heads=3,
+        head_dim=None,
+        lightning_nh=None,
+        lightning_nkv=None,
+        lightning_head_dim=None,
+    )
+
+    assert config.head_dim == 16
+    assert config.lightning_nh == 6
+    assert config.lightning_nkv == 3
+    assert config.lightning_head_dim == 16
 
 
 def test_minicpm_lightning_idle_batch_returns_empty_output():

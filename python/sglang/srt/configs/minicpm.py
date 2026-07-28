@@ -8,6 +8,18 @@ from sglang.srt.configs.mamba_utils import Mamba2CacheParams, Mamba2StateShape
 from sglang.srt.runtime_context import get_parallel
 
 
+_MIXER_TYPE_ALIASES = {
+    "minicpm4": "minicpm4",
+    "minicpm": "minicpm4",
+    "standard": "minicpm4",
+    "attention": "minicpm4",
+    "attn": "minicpm4",
+    "lightning": "lightning-attn",
+    "lightning_attn": "lightning-attn",
+    "lightning-attn": "lightning-attn",
+}
+
+
 class MiniCPMHybridConfig(PretrainedConfig):
     """
     Configuration class for hybrid MiniCPM models.
@@ -27,7 +39,7 @@ class MiniCPMHybridConfig(PretrainedConfig):
         num_hidden_layers=32,
         num_attention_heads=32,
         num_key_value_heads=8,
-        head_dim=128,
+        head_dim=None,
         hidden_act="silu",
         intermediate_size=14336,
         initializer_range=0.02,
@@ -47,9 +59,9 @@ class MiniCPMHybridConfig(PretrainedConfig):
         mixer_types=None,
         minicpm4=None,
         lightning=None,
-        lightning_nh=16,
-        lightning_nkv=16,
-        lightning_head_dim=64,
+        lightning_nh=None,
+        lightning_nkv=None,
+        lightning_head_dim=None,
         lightning_scale="1/sqrt(d)",
         lightning_layerwise_decay=False,
         lightning_use_rope=True,
@@ -78,7 +90,11 @@ class MiniCPMHybridConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
-        self.head_dim = head_dim
+        self.head_dim = (
+            head_dim
+            if head_dim is not None
+            else hidden_size // num_attention_heads
+        )
         self.max_position_embeddings = max_position_embeddings
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
@@ -91,12 +107,29 @@ class MiniCPMHybridConfig(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
         # Hybrid config fields
-        self.mixer_types = mixer_types
+        if not mixer_types:
+            mixer_types = ["minicpm4"]
+        elif len(mixer_types) > num_hidden_layers:
+            raise ValueError(f"Invalid number of mixer types: {len(mixer_types)}")
+        try:
+            mixer_types = [_MIXER_TYPE_ALIASES[mixer_type] for mixer_type in mixer_types]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported mixer type: {exc.args[0]}") from exc
+        repeats = (num_hidden_layers + len(mixer_types) - 1) // len(mixer_types)
+        self.mixer_types = (mixer_types * repeats)[:num_hidden_layers]
         self.minicpm4 = minicpm4
         self.lightning = lightning
-        self.lightning_nh = lightning_nh
-        self.lightning_nkv = lightning_nkv
-        self.lightning_head_dim = lightning_head_dim
+        self.lightning_nh = (
+            lightning_nh if lightning_nh is not None else num_attention_heads
+        )
+        self.lightning_nkv = (
+            lightning_nkv if lightning_nkv is not None else num_key_value_heads
+        )
+        self.lightning_head_dim = (
+            lightning_head_dim
+            if lightning_head_dim is not None
+            else self.head_dim
+        )
         self.lightning_scale = lightning_scale
         self.lightning_layerwise_decay = lightning_layerwise_decay
         self.lightning_use_rope = lightning_use_rope
@@ -173,47 +206,38 @@ class MiniCPMHybridConfig(PretrainedConfig):
 
     @property
     def full_attention_layer_ids(self):
-        if self.mixer_types is None:
-            return list(range(self.num_hidden_layers))
         return [
             i
             for i, mixer_type in enumerate(self.mixer_types)
-            if mixer_type in ["minicpm4", "minicpm", "standard", "attention", "attn"]
+            if mixer_type == "minicpm4"
         ]
 
     @property
     def has_minicpm_sparse_attention(self) -> bool:
         """Check if this config has MiniCPM sparse attention layers."""
-        return self.has_sparse_config and (
-            self.mixer_types is None or any(mt == "minicpm4" for mt in self.mixer_types)
+        return self.has_sparse_config and any(
+            mt == "minicpm4" for mt in self.mixer_types
         )
 
     @property
     def has_lightning_layers(self) -> bool:
         """Check if this config has lightning attention layers."""
-        return self.mixer_types is not None and any(
-            mt in ["lightning", "lightning_attn", "lightning-attn"]
-            for mt in self.mixer_types
-        )
+        return any(mt == "lightning-attn" for mt in self.mixer_types)
 
     @property
     def sparse_layer_ids(self) -> list:
         """Get the indices of layers with sparse attention."""
         if not self.has_sparse_config:
             return []
-        if self.mixer_types is None:
-            return list(range(self.num_hidden_layers))
         return [i for i, mt in enumerate(self.mixer_types) if mt == "minicpm4"]
 
     @property
     def lightning_layer_ids(self) -> list:
         """Get the indices of layers with lightning attention."""
-        if self.mixer_types is None:
-            return []
         return [
             i
             for i, mt in enumerate(self.mixer_types)
-            if mt in ["lightning", "lightning_attn", "lightning-attn"]
+            if mt == "lightning-attn"
         ]
 
 
