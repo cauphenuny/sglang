@@ -109,6 +109,24 @@ def test_minicpm_lightning_idle_batch_returns_empty_output():
     assert output.shape == (0, 8)
 
 
+def test_minicpm_lightning_attention_bias_applies_to_every_projection():
+    with get_parallel().override(tp_size=1, tp_rank=0):
+        mixer = MiniCPMLightningMixer(
+            hidden_size=8,
+            num_heads=2,
+            num_kv_heads=2,
+            head_dim=4,
+            use_rope=False,
+            use_output_gate=True,
+            attention_bias=True,
+            qk_norm=False,
+        )
+
+    assert mixer.qkv_proj.bias is not None
+    assert mixer.o_proj.bias is not None
+    assert mixer.z_proj.bias is not None
+
+
 def test_minicpm_lightning_reuses_shared_backend_and_cache_shape():
     config = MiniCPMHybridConfig(
         num_hidden_layers=2,

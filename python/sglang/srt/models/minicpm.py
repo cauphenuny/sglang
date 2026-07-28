@@ -258,7 +258,7 @@ class MiniCPMLightningMixer(nn.Module):
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=False,
+            bias=self.attention_bias,
             quant_config=quant_config,
             prefix=add_prefix("qkv_proj", prefix),
         )
@@ -266,7 +266,7 @@ class MiniCPMLightningMixer(nn.Module):
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=False,
+            bias=self.attention_bias,
             quant_config=quant_config,
             prefix=add_prefix("o_proj", prefix),
         )
