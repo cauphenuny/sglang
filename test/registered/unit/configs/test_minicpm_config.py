@@ -40,6 +40,7 @@ def test_minicpm_short_mixer_pattern_repeats_to_layer_count():
     config = MiniCPMHybridConfig(
         num_hidden_layers=5,
         mixer_types=["minicpm4", "lightning-attn"],
+        lightning_nkv=32,
     )
 
     assert config.mixer_types == [
@@ -57,6 +58,7 @@ def test_minicpm_mixer_aliases_are_canonicalized():
     config = MiniCPMHybridConfig(
         num_hidden_layers=4,
         mixer_types=["attention", "lightning_attn"],
+        lightning_nkv=32,
     )
 
     assert config.mixer_types == [
@@ -90,6 +92,15 @@ def test_minicpm_lightning_dimensions_fall_back_to_base_attention():
     assert config.lightning_nh == 6
     assert config.lightning_nkv == 3
     assert config.lightning_head_dim == 16
+
+
+def test_minicpm_rejects_lightning_gqa():
+    with pytest.raises(ValueError, match="seg_la backend does not support GQA"):
+        MiniCPMHybridConfig(
+            num_attention_heads=6,
+            num_key_value_heads=3,
+            mixer_types=["lightning-attn"],
+        )
 
 
 def test_minicpm_lightning_idle_batch_returns_empty_output():
@@ -147,6 +158,7 @@ def test_minicpm_lightning_reuses_shared_backend_and_cache_shape():
     config = MiniCPMHybridConfig(
         num_hidden_layers=2,
         mixer_types=["lightning", "minicpm4"],
+        lightning_nh=4,
         lightning_nkv=4,
         lightning_head_dim=64,
     )

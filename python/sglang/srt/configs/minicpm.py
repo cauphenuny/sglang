@@ -130,6 +130,16 @@ class MiniCPMHybridConfig(PretrainedConfig):
             if lightning_head_dim is not None
             else self.head_dim
         )
+        if (
+            "lightning-attn" in self.mixer_types
+            and self.lightning_nh != self.lightning_nkv
+        ):
+            raise ValueError(
+                "MiniCPM Lightning attention requires equal query and KV head "
+                "counts because the seg_la backend does not support GQA: "
+                f"lightning_nh={self.lightning_nh}, "
+                f"lightning_nkv={self.lightning_nkv}"
+            )
         self.lightning_scale = lightning_scale
         self.lightning_layerwise_decay = lightning_layerwise_decay
         self.lightning_use_rope = lightning_use_rope
