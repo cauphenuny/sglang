@@ -484,7 +484,9 @@ class TpModelWorker(BaseTpWorker):
             self.model_runner.effective_max_total_num_tokens - 1,
         )
         return (
-            self.model_runner.max_total_num_tokens,
+            self.model_runner.req_to_token_pool.schedulable_token_capacity(
+                self.model_runner.max_total_num_tokens
+            ),
             self.server_args.max_prefill_tokens,
             self.model_runner.max_running_requests,
             self.server_args.max_queued_requests,

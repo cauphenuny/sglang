@@ -218,7 +218,7 @@ def _build_resolved_backend(
     else:
         attn_backend = _build_backend_from_str(
             model_runner=model_runner,
-            backend_str=model_runner.server_args.attention_backend,
+            backend_str=resolved.prefill,
             init_new_workspace=init_new_workspace,
         )
     return attn_backend
