@@ -98,6 +98,7 @@ class MiniCPMAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         attn_use_rope: bool = True,
         use_output_gate: bool = False,
+        attention_bias: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -130,14 +131,14 @@ class MiniCPMAttention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=False,
+            bias=attention_bias,
             quant_config=quant_config,
             prefix=add_prefix("qkv_proj", prefix),
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=False,
+            bias=attention_bias,
             quant_config=quant_config,
             prefix=add_prefix("o_proj", prefix),
         )
@@ -164,7 +165,7 @@ class MiniCPMAttention(nn.Module):
             self.o_gate = ColumnParallelLinear(
                 hidden_size,
                 self.total_num_heads * self.head_dim,
-                bias=False,
+                bias=attention_bias,
                 quant_config=quant_config,
                 prefix=add_prefix("o_gate", prefix),
             )
@@ -389,6 +390,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 quant_config=quant_config,
                 attn_use_rope=attn_use_rope,
                 use_output_gate=attn_use_output_gate,
+                attention_bias=getattr(config, "attention_bias", False),
                 prefix=add_prefix("self_attn", prefix),
             )
         elif self.mixer_type in ["lightning", "lightning_attn", "lightning-attn"]:

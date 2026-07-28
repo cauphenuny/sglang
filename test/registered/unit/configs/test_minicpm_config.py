@@ -9,7 +9,7 @@ from sglang.srt.configs.minicpm import MiniCPMHybridConfig
 from sglang.srt.layers.attention.linear.lightning_backend import (
     LightningAttentionBackend,
 )
-from sglang.srt.models.minicpm import MiniCPMLightningMixer
+from sglang.srt.models.minicpm import MiniCPMAttention, MiniCPMLightningMixer
 from sglang.srt.runtime_context import get_parallel
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -125,6 +125,22 @@ def test_minicpm_lightning_attention_bias_applies_to_every_projection():
     assert mixer.qkv_proj.bias is not None
     assert mixer.o_proj.bias is not None
     assert mixer.z_proj.bias is not None
+
+
+def test_minicpm_full_attention_bias_applies_to_every_projection():
+    with get_parallel().override(tp_size=1, tp_rank=0):
+        mixer = MiniCPMAttention(
+            hidden_size=8,
+            num_heads=2,
+            num_kv_heads=2,
+            attn_use_rope=False,
+            use_output_gate=True,
+            attention_bias=True,
+        )
+
+    assert mixer.qkv_proj.bias is not None
+    assert mixer.o_proj.bias is not None
+    assert mixer.o_gate.bias is not None
 
 
 def test_minicpm_lightning_reuses_shared_backend_and_cache_shape():
