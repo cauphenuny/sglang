@@ -689,12 +689,20 @@ class MiniCPMSparseBackend(AttentionBackend):
 
             pt_k1, pt_k2 = 0, 0
             compressed_k = torch.zeros(
-                (sum(k1_lens[sparse_bs]), layer.tp_k_head_num, layer.head_dim),
+                (
+                    sum(k1_lens[i] for i in sparse_bs),
+                    layer.tp_k_head_num,
+                    layer.head_dim,
+                ),
                 dtype=key_states.dtype,
                 device=key_states.device,
             )
             compressed_k2 = torch.zeros(
-                (sum(k2_lens[sparse_bs]), layer.tp_k_head_num, layer.head_dim),
+                (
+                    sum(k2_lens[i] for i in sparse_bs),
+                    layer.tp_k_head_num,
+                    layer.head_dim,
+                ),
                 dtype=key_states.dtype,
                 device=key_states.device,
             )
@@ -702,26 +710,24 @@ class MiniCPMSparseBackend(AttentionBackend):
             compressed_cu_seqlens, compressed_cu_seqlens2 = [0], [0]
 
             for sparse_bs_idx in sparse_bs:
-                start = self.forward_metadata.k1.cu_seqlens[sparse_bs_idx]
-                end = self.forward_metadata.k1.cu_seqlens[sparse_bs_idx + 1]
-                compressed_k[pt_k1 : pt_k1 + (end - start), :, :] = full_compressed_k1[
+                start = self.forward_metadata.k1.cu_seqlens_cpu[sparse_bs_idx]
+                end = self.forward_metadata.k1.cu_seqlens_cpu[sparse_bs_idx + 1]
+                k1_len = k1_lens[sparse_bs_idx]
+                compressed_k[pt_k1 : pt_k1 + k1_len, :, :] = full_compressed_k1[
                     start:end, :, :
                 ]
 
-                start2 = self.forward_metadata.k2.cu_seqlens[sparse_bs_idx]
-                end2 = self.forward_metadata.k2.cu_seqlens[sparse_bs_idx + 1]
-                compressed_k2[pt_k2 : pt_k2 + (end2 - start2), :, :] = (
+                start2 = self.forward_metadata.k2.cu_seqlens_cpu[sparse_bs_idx]
+                end2 = self.forward_metadata.k2.cu_seqlens_cpu[sparse_bs_idx + 1]
+                k2_len = k2_lens[sparse_bs_idx]
+                compressed_k2[pt_k2 : pt_k2 + k2_len, :, :] = (
                     full_compressed_k2[start2:end2, :, :]
                 )
 
-                pt_k1 += k1_lens[sparse_bs_idx]
-                pt_k2 += k2_lens[sparse_bs_idx]
-                compressed_cu_seqlens.append(
-                    compressed_cu_seqlens[-1] + k1_lens[sparse_bs_idx]
-                )
-                compressed_cu_seqlens2.append(
-                    compressed_cu_seqlens2[-1] + k2_lens[sparse_bs_idx]
-                )
+                pt_k1 += k1_len
+                pt_k2 += k2_len
+                compressed_cu_seqlens.append(compressed_cu_seqlens[-1] + k1_len)
+                compressed_cu_seqlens2.append(compressed_cu_seqlens2[-1] + k2_len)
 
             compressed_cu_seqlens = torch.tensor(
                 compressed_cu_seqlens, dtype=torch.int32, device=key_states.device
@@ -1041,8 +1047,8 @@ class MiniCPMSparseBackend(AttentionBackend):
                 metadata.sparse_idx, : self.num_sparse_topk_tokens
             ] = sparse_page_table_sparse_bs
         else:
-            total_k1 = self.forward_metadata.k1.cu_total_compress_token_nums[-1].item()
-            total_k2 = self.forward_metadata.k2.cu_total_compress_token_nums[-1].item()
+            total_k1 = self.forward_metadata.k1.cu_seqlens_cpu[-1]
+            total_k2 = self.forward_metadata.k2.cu_seqlens_cpu[-1]
 
             full_compressed_k1_ext, full_compressed_k2_ext = allocate_and_compress_keys(
                 layer=layer,

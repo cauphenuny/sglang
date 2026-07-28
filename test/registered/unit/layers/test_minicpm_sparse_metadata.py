@@ -25,6 +25,11 @@ def _compression_layout():
     )
 
 
+class _DeviceOffsetsMustNotBeRead:
+    def __getitem__(self, _index):
+        raise AssertionError("prefill layers must use scheduler-derived CPU offsets")
+
+
 class TestMiniCPMSparseMetadata(unittest.TestCase):
     def test_builder_does_not_require_unused_configuration(self):
         SparseMetadataBuilder()
@@ -384,14 +389,20 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
         backend.forward_metadata = SimpleNamespace(
             sparse_batch_size=1,
-            k1=SimpleNamespace(cu_seqlens=torch.tensor([0, 0, 1])),
-            k2=SimpleNamespace(cu_seqlens=torch.tensor([0, 0, 1])),
+            k1=SimpleNamespace(
+                cu_seqlens=_DeviceOffsetsMustNotBeRead(),
+                cu_seqlens_cpu=[0, 0, 1],
+            ),
+            k2=SimpleNamespace(
+                cu_seqlens=_DeviceOffsetsMustNotBeRead(),
+                cu_seqlens_cpu=[0, 0, 1],
+            ),
         )
         backend.sparse_metadata_builder = SimpleNamespace(
             build_prefill_topk_metadata=lambda **_: {
                 "sparse_bs": [1],
-                "k1_lens": torch.tensor([0, 1]),
-                "k2_lens": torch.tensor([0, 1]),
+                "k1_lens": [0, 1],
+                "k2_lens": [0, 1],
                 "cu_seqlens_q": torch.tensor([0, 1], dtype=torch.int32),
                 "cu_seqlens_k": torch.tensor([0, 1], dtype=torch.int32),
                 "max_seqlen_q": 1,
@@ -467,6 +478,8 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             cu_seqlens_q=base_metadata.cu_seqlens_q,
         )
 
+        self.assertEqual(metadata["k1"].cu_seqlens_cpu, [0, 5, 16, 33])
+        self.assertEqual(metadata["k2"].cu_seqlens_cpu, [0, 0, 2, 5])
         for level in (metadata["k1"], metadata["k2"]):
             self.assertEqual(level.table.shape[0], forward_batch.batch_size)
             self.assertEqual(

@@ -553,6 +553,7 @@ class CompressionLevelMetadata(msgspec.Struct):
 
     # Cumulative sequence lengths for compressed cache
     cu_seqlens: Optional[torch.Tensor] = None
+    cu_seqlens_cpu: Optional[list[int]] = None
     max_seq_len: int = 0
 
     # Token mapping table (request pool indices -> compressed cache tokens)
@@ -705,6 +706,9 @@ class SparseMetadataBuilder:
             )
 
         max_seq_len = seqlen_cpu.max().item()
+        cu_seqlens_cpu = F.pad(
+            torch.cumsum(seqlen_cpu, dim=0, dtype=torch.int32), (1, 0)
+        ).tolist()
         cu_seqlens = F.pad(
             torch.cumsum(
                 seqlen_cpu.to(device=cu_seqlens_q.device), dim=0, dtype=torch.int32
@@ -753,6 +757,7 @@ class SparseMetadataBuilder:
 
         return {
             "cu_seqlens": cu_seqlens,
+            "cu_seqlens_cpu": cu_seqlens_cpu,
             "max_seq_len": max_seq_len,
             "token_table": token_table,
             "history_compress_token_nums": history_compress_token_nums,
@@ -818,6 +823,7 @@ class SparseMetadataBuilder:
         return {
             "k1": CompressionLevelMetadata(
                 cu_seqlens=k1_dict["cu_seqlens"],
+                cu_seqlens_cpu=k1_dict["cu_seqlens_cpu"],
                 max_seq_len=k1_dict["max_seq_len"],
                 table=k1_dict["token_table"],
                 history_compress_token_nums=k1_dict["history_compress_token_nums"],
@@ -830,6 +836,7 @@ class SparseMetadataBuilder:
             ),
             "k2": CompressionLevelMetadata(
                 cu_seqlens=k2_dict["cu_seqlens"],
+                cu_seqlens_cpu=k2_dict["cu_seqlens_cpu"],
                 max_seq_len=k2_dict["max_seq_len"],
                 table=k2_dict["token_table"],
                 history_compress_token_nums=k2_dict["history_compress_token_nums"],
@@ -1090,7 +1097,7 @@ class SparseMetadataBuilder:
             )
             for seq_len in forward_batch.seq_lens_cpu
         ]
-        k1_lens = torch.tensor(token_num_sparse_k1_total, dtype=torch.int64)
+        k1_lens = token_num_sparse_k1_total
 
         token_num_sparse_k2_total = [
             (
@@ -1100,7 +1107,7 @@ class SparseMetadataBuilder:
             )
             for seq_len in forward_batch.seq_lens_cpu
         ]
-        k2_lens = torch.tensor(token_num_sparse_k2_total, dtype=torch.int64)
+        k2_lens = token_num_sparse_k2_total
 
         sparse_bs = []
         seqlens_q_sparse_bs = []
