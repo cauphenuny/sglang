@@ -34,6 +34,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from sglang.srt.arg_groups.arg_utils import resolvable_fields
+from sglang.srt.configs.minicpm import MiniCPMHybridConfig
 from sglang.srt.environ import envs
 from sglang.srt.model_executor.cuda_graph_config import Backend
 from sglang.srt.utils.common import (
@@ -745,6 +746,46 @@ def _moss_vl_overrides(server_args: Any, hf_config: Any) -> dict:
         "MossVLForConditionalGeneration requires flashinfer prefill "
         "attention backend for cross-attention custom mask support."
     )
+    return overrides
+
+
+@_register_for("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM")
+def _minicpm_sala_overrides(server_args: Any, hf_config: Any) -> dict:
+    if isinstance(hf_config, MiniCPMHybridConfig):
+        has_sparse_attention = hf_config.has_minicpm_sparse_attention
+        has_hybrid_attention = has_sparse_attention or hf_config.has_lightning_layers
+    else:
+        has_sparse_attention = False
+        has_hybrid_attention = False
+    overrides: Dict[str, Any] = {}
+    if has_hybrid_attention:
+        overrides["disable_radix_cache"] = True
+    if envs.SGLANG_MINICPM_FORCE_DENSE.get():
+        dense_backend = {
+            "minicpm_flashattn": ("fa4" if is_blackwell_supported() else "fa3"),
+            "minicpm_flashinfer": "flashinfer",
+        }.get(server_args.attention_backend)
+        if dense_backend is not None:
+            overrides["attention_backend"] = dense_backend
+    elif has_sparse_attention:
+        uses_sparse_backend = server_args.is_attention_backend_not_set() or any(
+            backend in ("minicpm_flashattn", "minicpm_flashinfer")
+            for backend in (
+                server_args.attention_backend,
+                server_args.prefill_attention_backend,
+                server_args.decode_attention_backend,
+            )
+        )
+        if uses_sparse_backend and server_args.disaggregation_mode != "null":
+            raise ValueError(
+                "MiniCPM sparse attention does not support PD disaggregation"
+            )
+        if server_args.is_attention_backend_not_set():
+            overrides["attention_backend"] = (
+                "minicpm_flashinfer"
+                if is_blackwell_supported()
+                else "minicpm_flashattn"
+            )
     return overrides
 
 
