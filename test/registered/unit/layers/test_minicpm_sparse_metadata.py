@@ -1,12 +1,18 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
 from sglang.srt.layers.attention.minicpm import backend as backend_module
 from sglang.srt.layers.attention.minicpm import sparse_utils
-from sglang.srt.layers.attention.minicpm.backend import MiniCPMSparseBackend
+from sglang.srt.layers.attention.minicpm.attention_adapter import (
+    MiniCPMFlashAttentionAdapter,
+)
+from sglang.srt.layers.attention.minicpm.backend import (
+    MiniCPMSparseBackend,
+    _transpose_head_group_layout,
+)
 from sglang.srt.layers.attention.minicpm.sparse_utils import CompressionLevelMetadata
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -28,13 +34,38 @@ class _DeviceOffsetsMustNotBeRead:
 
 
 class TestMiniCPMSparseMetadata(unittest.TestCase):
+    def test_head_group_layout_round_trip(self):
+        tensor = torch.arange(10).reshape(5, 2, 1)
+        original = tensor.clone()
+
+        _transpose_head_group_layout(
+            tensor,
+            [(1, 2)],
+            head_group_num=2,
+            heads_per_group=2,
+            to_group_major=True,
+        )
+        self.assertEqual(
+            tensor.squeeze(-1).tolist(),
+            [[0, 1], [2, 3], [6, 7], [4, 5], [8, 9]],
+        )
+
+        _transpose_head_group_layout(
+            tensor,
+            [(1, 2)],
+            head_group_num=2,
+            heads_per_group=2,
+            to_group_major=False,
+        )
+        self.assertTrue(torch.equal(tensor, original))
+
     def test_flashattn_variant_uses_fa4_on_blackwell(self):
         """Blackwell must select FA4 because FA3 binaries cannot execute there."""
         req_pool = SimpleNamespace(
             req_to_sparse_k1_token=torch.empty(0),
             req_to_sparse_k2_token=torch.empty(0),
         )
-        base_backend = SimpleNamespace(
+        flash_attn_backend = SimpleNamespace(
             max_context_len=256,
             device="cpu",
             decode_cuda_graph_metadata={},
@@ -80,7 +111,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             patch.object(
                 backend_module,
                 "FlashAttentionBackend",
-                return_value=base_backend,
+                return_value=flash_attn_backend,
             ) as flash_attention,
             patch.object(
                 backend_module,
@@ -96,10 +127,45 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             skip_prefill=False,
             fa_impl_ver=4,
         )
+        self.assertIs(backend.flash_attn_backend, flash_attn_backend)
+        self.assertIs(
+            backend.token_to_kv_pool,
+            flash_attn_backend.token_to_kv_pool,
+        )
+        self.assertIsInstance(
+            backend.attention_adapter,
+            MiniCPMFlashAttentionAdapter,
+        )
         self.assertEqual(backend.fused_kernel_kwargs["dtype_str"], "float16")
         self.assertEqual(backend.fused_kernel_kwargs["kernel_stride"], 16)
 
         model_runner.server_args.attention_backend = "minicpm_flashinfer"
+        flashinfer_adapter = object()
+        with (
+            patch.object(backend_module, "MiniCPMHybridConfig", SimpleNamespace),
+            patch.object(backend_module, "is_blackwell_supported", return_value=True),
+            patch.object(
+                backend_module,
+                "FlashAttentionBackend",
+                return_value=flash_attn_backend,
+            ),
+            patch.object(
+                backend_module,
+                "MiniCPMFlashInferAdapter",
+                return_value=flashinfer_adapter,
+            ),
+            patch.object(
+                backend_module,
+                "get_parallel",
+                return_value=SimpleNamespace(attn_tp_size=1),
+            ),
+            patch.object(backend_module, "attach_compressed_cache"),
+        ):
+            backend = MiniCPMSparseBackend(model_runner)
+
+        self.assertIs(backend.flash_attn_backend, flash_attn_backend)
+        self.assertIs(backend.attention_adapter, flashinfer_adapter)
+
         model_config.num_attention_heads = 8
         with (
             patch.object(backend_module, "MiniCPMHybridConfig", SimpleNamespace),
@@ -107,7 +173,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             patch.object(
                 backend_module,
                 "FlashAttentionBackend",
-                return_value=base_backend,
+                return_value=flash_attn_backend,
             ),
             patch.object(
                 backend_module,
@@ -165,6 +231,67 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
 
         self.assertEqual(metadata["sparse_page_table"].shape, (2, 8192))
 
+    def test_dense_decode_keeps_selected_adapter(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        q = torch.ones(1, 1)
+        k = torch.ones(1, 1, 1)
+        v = torch.ones(1, 1, 1)
+        key_cache = torch.ones(4, 1, 1, 1)
+        value_cache = torch.ones(4, 1, 1, 1)
+        backend.flash_attn_backend = SimpleNamespace(
+            write_mha_kv_cache=Mock(),
+            prepare_paged_mha_query=Mock(return_value=(q, None, None, None, None)),
+            get_paged_mha_kv_cache=Mock(return_value=(key_cache, value_cache)),
+            forward_decode=Mock(),
+        )
+        backend.attention_adapter = SimpleNamespace(
+            forward=Mock(return_value=torch.ones(1, 1, 1))
+        )
+        backend.forward_metadata = SimpleNamespace(
+            page_table=torch.tensor([[0, 1, 0, 0]], dtype=torch.int32),
+            cache_seqlens_int32=torch.tensor([2], dtype=torch.int32),
+            sparse_page_table=torch.zeros((1, 4), dtype=torch.int32),
+            sparse_cache_seqlens_int32=torch.tensor([2], dtype=torch.int32),
+            sparse_cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            sparse_cu_seqlens_k=torch.tensor([0, 2], dtype=torch.int32),
+            max_seq_len_q=1,
+        )
+        backend.head_group_num = 1
+        backend.heads_per_group = 1
+        backend.page_size = 1
+        backend.dense_len = 4
+        backend._use_cuda_graph_buffers = False
+        backend._compress_decode_keys = Mock()
+        backend.get_topk_for_sparse = Mock(
+            side_effect=AssertionError("dense_branch must skip sparse top-k")
+        )
+        layer = SimpleNamespace(
+            is_cross_attention=False,
+            sliding_window_size=-1,
+            tp_q_head_num=1,
+            tp_k_head_num=1,
+            tp_v_head_num=1,
+            head_dim=1,
+            v_head_dim=1,
+            k_scale=None,
+            v_scale=None,
+        )
+        forward_batch = SimpleNamespace(
+            batch_size=1,
+            seq_lens_cpu=torch.tensor([2], dtype=torch.int32),
+            out_cache_loc=torch.tensor([1], dtype=torch.int64),
+        )
+
+        backend.forward_decode(q, k, v, layer, forward_batch)
+
+        backend._compress_decode_keys.assert_called_once()
+        backend.attention_adapter.forward.assert_called_once()
+        backend.flash_attn_backend.forward_decode.assert_not_called()
+        self.assertEqual(
+            backend.forward_metadata.sparse_page_table[0, :2].tolist(),
+            [0, 1],
+        )
+
     def test_decode_metadata_supports_one_local_head_group(self):
         """Tensor parallelism may leave one local KV head without changing metadata."""
         forward_batch = SimpleNamespace(
@@ -221,8 +348,11 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
     def test_cuda_graph_page_table_covers_dense_decode(self):
         """Captured dense decode must reserve a threshold-sized page table."""
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
-        backend.base_backend = SimpleNamespace(
+        backend.flash_attn_backend = SimpleNamespace(
             decode_cuda_graph_metadata={},
+            init_cuda_graph_state=lambda *_: None,
+        )
+        backend.attention_adapter = SimpleNamespace(
             init_cuda_graph_state=lambda *_: None,
         )
         backend.num_sparse_topk_tokens = 6144
@@ -341,7 +471,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         """Only replay metadata may be marked as backed by CUDA graph buffers."""
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
         metadata = SimpleNamespace()
-        backend.base_backend = SimpleNamespace(
+        backend.flash_attn_backend = SimpleNamespace(
             forward_metadata=metadata,
             init_forward_metadata=lambda *_: None,
             init_forward_metadata_out_graph=lambda *_: None,
@@ -349,7 +479,9 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         backend.update_batch_for_sparse = lambda *_: None
         backend._get_fused_topk_kernel = lambda *_args, **_kwargs: None
         backend._replay_sparse_graph_metadata = lambda *_: None
-        backend.use_flashinfer = False
+        backend.attention_adapter = SimpleNamespace(
+            prepare_forward=lambda *_args, **_kwargs: None,
+        )
         forward_mode = SimpleNamespace(
             is_target_verify=lambda: False,
             is_draft_extend_v2=lambda: False,
@@ -369,7 +501,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         """An idle DP rank must not attempt sparse metadata construction."""
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
         metadata = SimpleNamespace()
-        backend.base_backend = SimpleNamespace(
+        backend.flash_attn_backend = SimpleNamespace(
             forward_metadata=metadata,
             init_forward_metadata=lambda *_: None,
         )

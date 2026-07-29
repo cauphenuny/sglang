@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING, Optional
 import torch
 import torch.nn.functional as F
 
-from sglang.kernels.ops.attention.flash_attention import flash_attn_with_kvcache
-from sglang.kernels.ops.attention.utils import create_flashinfer_kv_indices_triton
 from sglang.srt.configs.minicpm import MiniCPMHybridConfig
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
@@ -15,10 +13,14 @@ from sglang.srt.layers.attention.flashattention_backend import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
 )
+from sglang.srt.layers.attention.minicpm.attention_adapter import (
+    MiniCPMFlashAttentionAdapter,
+    MiniCPMFlashInferAdapter,
+)
 from sglang.srt.layers.attention.minicpm.cache import attach_compressed_cache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.runtime_context import get_parallel
-from sglang.srt.utils import is_blackwell_supported, is_flashinfer_available
+from sglang.srt.utils import is_blackwell_supported
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
@@ -53,6 +55,28 @@ from sglang.srt.layers.attention.minicpm.sparse_utils import (
 )
 
 
+def _transpose_head_group_layout(
+    tensor: torch.Tensor,
+    spans: list[tuple[int, int]],
+    *,
+    head_group_num: int,
+    heads_per_group: int,
+    to_group_major: bool,
+) -> None:
+    for start, seq_len in spans:
+        end = start + head_group_num * seq_len
+        leading_shape = (
+            (seq_len, head_group_num) if to_group_major else (head_group_num, seq_len)
+        )
+        tensor[start:end] = (
+            tensor[start:end]
+            .clone()
+            .view(*leading_shape, heads_per_group, tensor.shape[-1])
+            .transpose(0, 1)
+            .reshape(-1, heads_per_group, tensor.shape[-1])
+        )
+
+
 class MiniCPMSparseBackend(AttentionBackend):
     """MiniCPM sparse dispatch layered on the standard FlashAttention backend."""
 
@@ -64,32 +88,29 @@ class MiniCPMSparseBackend(AttentionBackend):
     ):
         super().__init__()
         attention_backend = model_runner.server_args.attention_backend
-        self.use_flashinfer = attention_backend == "minicpm_flashinfer"
+        use_flashinfer = attention_backend == "minicpm_flashinfer"
         use_blackwell = is_blackwell_supported()
         if use_blackwell:
             fa_impl_ver = 4
-        self.base_backend = FlashAttentionBackend(
+        self.flash_attn_backend = FlashAttentionBackend(
             model_runner,
             skip_prefill=skip_prefill,
             fa_impl_ver=fa_impl_ver,
         )
         self.forward_metadata: Optional[FlashAttentionMetadata] = None
-        self.max_context_len = self.base_backend.max_context_len
-        self.device = self.base_backend.device
+        self.max_context_len = self.flash_attn_backend.max_context_len
+        self.device = self.flash_attn_backend.device
         self.model_dtype = model_runner.dtype
-        self.enable_cuda_graph = not model_runner.server_args.disable_cuda_graph
         self._use_cuda_graph_buffers = False
-        self.decode_cuda_graph_metadata = self.base_backend.decode_cuda_graph_metadata
-        self.req_to_token_pool = self.base_backend.req_to_token_pool
-        self.token_to_kv_pool = self.base_backend.token_to_kv_pool
-        self.kv_cache_dtype = self.base_backend.kv_cache_dtype
-        self.kv_cache_dtype_str = self.base_backend.kv_cache_dtype_str
-        self.page_size = self.base_backend.page_size
+        self.decode_cuda_graph_metadata = (
+            self.flash_attn_backend.decode_cuda_graph_metadata
+        )
+        self.req_to_token_pool = self.flash_attn_backend.req_to_token_pool
+        self.token_to_kv_pool = self.flash_attn_backend.token_to_kv_pool
+        self.page_size = self.flash_attn_backend.page_size
         tp_size = get_parallel().attn_tp_size
         self.num_kv_heads = model_runner.model_config.get_num_kv_heads(tp_size)
         self.num_q_heads = model_runner.model_config.num_attention_heads // tp_size
-        self.fa_impl_ver = self.base_backend.fa_impl_ver
-        self.num_splits = self.base_backend.num_splits
 
         # Sparse attention configuration (required for MiniCPM)
         hf_config = model_runner.model_config.hf_config
@@ -149,7 +170,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.k2_kernel_stride = self.kernel_stride * 4
 
         self.minicpm_fuse_topk = (
-            use_blackwell and self.use_flashinfer
+            use_blackwell and use_flashinfer
         ) or envs.SGLANG_MINICPM_FUSE_TOPK.get()
         if self.minicpm_fuse_topk and self.heads_per_group != 16:
             raise ValueError(
@@ -216,53 +237,18 @@ class MiniCPMSparseBackend(AttentionBackend):
                 "attention_backend='minicpm_flashattn' or 'minicpm_flashinfer'."
             )
 
-        self.flashinfer_backend = None
-        if self.use_flashinfer:
-            if not is_flashinfer_available():
-                raise RuntimeError(
-                    "minicpm_flashinfer requires the flashinfer package."
-                )
-            from sglang.srt.layers.attention.flashinfer_backend import (
-                FlashInferAttnBackend,
-            )
-
-            max_sparse_bs = model_runner.req_to_token_pool.size * self.head_group_num
-            self.flashinfer_kv_indptr = torch.zeros(
-                max_sparse_bs + 1, dtype=torch.int32, device=self.device
-            )
-            self.flashinfer_kv_indices = torch.zeros(
-                max_sparse_bs * self.num_sparse_topk_tokens,
-                dtype=torch.int32,
-                device=self.device,
-            )
-            self.flashinfer_kv_last_page_len = torch.ones(
-                max_sparse_bs, dtype=torch.int32, device=self.device
-            )
-            self.flashinfer_rows = torch.arange(
-                max_sparse_bs, dtype=torch.int32, device=self.device
-            )
-            self.flashinfer_backend = FlashInferAttnBackend(
+        self.attention_adapter = (
+            MiniCPMFlashInferAdapter(
                 model_runner,
-                skip_prefill=False,
-                kv_indptr_buf=self.flashinfer_kv_indptr,
-                kv_last_page_len_buf=self.flashinfer_kv_last_page_len,
+                head_group_num=self.head_group_num,
+                heads_per_group=self.heads_per_group,
+                head_dim=self.head_dim,
+                page_size=self.page_size,
+                num_sparse_topk_tokens=self.num_sparse_topk_tokens,
             )
-            if self.enable_cuda_graph:
-                self.flashinfer_backend.init_cuda_graph_state(
-                    max_sparse_bs,
-                    max_sparse_bs,
-                    kv_indices_buf=self.flashinfer_kv_indices,
-                )
-            self.flashinfer_decode_graph_wrappers = {}
-            self.flashinfer_active_wrapper = None
-            self.flashinfer_active_kv_indptr = None
-            self.flashinfer_active_kv_indices = None
-            self.flashinfer_active_rows = None
-            self.flashinfer_prefill_planned = False
-            self.flashinfer_num_qo_heads = self.heads_per_group
-            self.flashinfer_num_kv_heads = self.num_kv_heads // self.head_group_num
-            self.flashinfer_q_dtype = model_runner.dtype
-            self.flashinfer_kv_dtype = model_runner.kv_cache_dtype
+            if use_flashinfer
+            else MiniCPMFlashAttentionAdapter(self.flash_attn_backend)
+        )
 
     def _get_fused_topk_kernel(self, batch_size: int, *, is_prefill: bool):
         if not self.minicpm_fuse_topk:
@@ -431,141 +417,76 @@ class MiniCPMSparseBackend(AttentionBackend):
             )
 
         self._use_cuda_graph_buffers = False
-        self.base_backend.init_forward_metadata(forward_batch)
-        metadata = self.base_backend.forward_metadata
+        self.flash_attn_backend.init_forward_metadata(forward_batch)
+        metadata = self.flash_attn_backend.forward_metadata
         if forward_batch.forward_mode.is_idle():
             self.forward_metadata = metadata
             return
         self.update_batch_for_sparse(forward_batch, metadata)
-        if self.use_flashinfer:
-            if forward_batch.forward_mode.is_decode_or_idle():
-                self._prepare_flashinfer(metadata, is_prefill=False)
-            else:
-                self.flashinfer_prefill_planned = False
+        self.attention_adapter.prepare_forward(
+            metadata,
+            is_prefill=not forward_batch.forward_mode.is_decode_or_idle(),
+            graph=False,
+            in_capture=False,
+        )
         self.forward_metadata = metadata
 
-    def _prepare_flashinfer(
+    def _compress_decode_keys(
         self,
-        metadata: FlashAttentionMetadata,
-        *,
-        is_prefill: bool,
-        graph: bool = False,
-        in_capture: bool = False,
-    ):
-        cache_seqlens = metadata.sparse_cache_seqlens_int32
-        sparse_bs = cache_seqlens.numel()
-        if sparse_bs == 0:
-            self.flashinfer_active_wrapper = None
-            return
-
-        if is_prefill:
-            # Sparse prefill has one page-table row per query token and head
-            # group, while decode has only one row per request and head group.
-            # Keep prefill buffers batch-sized instead of reserving them in the
-            # CUDA-graph state, which only serves decode.
-            kv_indptr = metadata.sparse_cu_seqlens_k
-            kv_indices = torch.empty(
-                metadata.sparse_page_table.numel(),
-                dtype=torch.int32,
-                device=self.device,
-            )
-            kv_last_page_len = (cache_seqlens > 0).to(torch.int32)
-            rows = torch.arange(sparse_bs, dtype=torch.int32, device=self.device)
-            wrapper = self.flashinfer_backend.prefill_wrappers_paged[0]
-            wrapper.begin_forward(
-                metadata.sparse_cu_seqlens_q,
-                kv_indptr,
-                kv_indices,
-                kv_last_page_len,
-                self.flashinfer_num_qo_heads,
-                self.flashinfer_num_kv_heads,
-                self.head_dim,
-                self.page_size,
-                causal=True,
-                q_data_type=self.flashinfer_q_dtype,
-                kv_data_type=self.flashinfer_kv_dtype,
-                non_blocking=True,
-            )
-        else:
-            kv_indptr = self.flashinfer_kv_indptr[: sparse_bs + 1]
-            kv_indptr[0] = 0
-            torch.cumsum(cache_seqlens, dim=0, out=kv_indptr[1:])
-            kv_indices = self.flashinfer_kv_indices[
-                : sparse_bs * self.num_sparse_topk_tokens
-            ]
-            kv_last_page_len = self.flashinfer_kv_last_page_len[:sparse_bs]
-            kv_last_page_len.copy_((cache_seqlens > 0).to(torch.int32))
-            rows = self.flashinfer_rows[:sparse_bs]
-            graph_bs = sparse_bs // self.head_group_num
-            if graph and in_capture:
-                wrapper = self.flashinfer_backend._create_decode_wrappers(
-                    graph_bs, sparse_bs
-                )[0]
-                self.flashinfer_decode_graph_wrappers[graph_bs] = wrapper
-            elif graph:
-                wrapper = self.flashinfer_decode_graph_wrappers[graph_bs]
-            else:
-                wrapper = self.flashinfer_backend.decode_wrappers[0]
-
-            wrapper.begin_forward(
-                kv_indptr,
-                kv_indices,
-                kv_last_page_len,
-                self.flashinfer_num_qo_heads,
-                self.flashinfer_num_kv_heads,
-                self.head_dim,
-                self.page_size,
-                q_data_type=self.flashinfer_q_dtype,
-                kv_data_type=self.flashinfer_kv_dtype,
-                non_blocking=True,
-            )
-
-        self.flashinfer_active_wrapper = wrapper
-        self.flashinfer_active_kv_indptr = kv_indptr
-        self.flashinfer_active_kv_indices = kv_indices
-        self.flashinfer_active_rows = rows
-
-    def _forward_flashinfer(
-        self,
-        q: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        metadata: FlashAttentionMetadata,
+        query_states: torch.Tensor,
         layer: RadixAttention,
-        *,
-        is_prefill: bool,
-    ):
-        cache_seqlens = metadata.sparse_cache_seqlens_int32
-        sparse_bs = cache_seqlens.numel()
-        create_flashinfer_kv_indices_triton[(sparse_bs,)](
-            metadata.sparse_page_table,
-            self.flashinfer_active_rows,
-            cache_seqlens,
-            self.flashinfer_active_kv_indptr,
-            None,
-            self.flashinfer_active_kv_indices,
-            metadata.sparse_page_table.stride(0),
+        forward_batch: ForwardBatch,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        metadata = self.forward_metadata
+        if self._use_cuda_graph_buffers:
+            compressed_k = self.decode_cuda_graph_metadata["compress_k1"][
+                : forward_batch.batch_size
+                * self.max_context_len
+                // self.k1_kernel_stride,
+                :,
+                :,
+            ]
+            compressed_k2 = self.decode_cuda_graph_metadata["compress_k2"][
+                : forward_batch.batch_size
+                * self.max_context_len
+                // self.k2_kernel_stride,
+                :,
+                :,
+            ]
+            get_compress_k_v2(
+                layer=layer,
+                forward_batch=forward_batch,
+                metadata=metadata,
+                full_compressed_k1=compressed_k,
+                full_compressed_k2=compressed_k2,
+                max_context_length=self.max_context_len,
+                k1_kernel_size=self.k1_kernel_size,
+                k1_kernel_stride=self.k1_kernel_stride,
+                k2_kernel_size=self.k2_kernel_size,
+                k2_kernel_stride=self.k2_kernel_stride,
+                padded=self.minicpm_split_stage1,
+            )
+            return compressed_k, compressed_k2
+
+        return allocate_and_compress_keys(
+            layer=layer,
+            forward_batch=forward_batch,
+            metadata=metadata,
+            k1_token_nums=forward_batch.batch_size
+            * self.max_context_len
+            // self.k1_kernel_stride,
+            k2_token_nums=forward_batch.batch_size
+            * self.max_context_len
+            // self.k2_kernel_stride,
+            k1_kernel_size=self.k1_kernel_size,
+            k1_kernel_stride=self.k1_kernel_stride,
+            k2_kernel_size=self.k2_kernel_size,
+            k2_kernel_stride=self.k2_kernel_stride,
+            dtype=query_states.dtype,
+            device=self.device,
+            max_context_length=self.max_context_len,
+            minicpm_split_stage1=self.minicpm_split_stage1,
         )
-        kwargs = {
-            "sm_scale": layer.scaling,
-            "logits_soft_cap": layer.logit_cap or None,
-            "k_scale": layer.k_scale_float,
-            "v_scale": layer.v_scale_float,
-        }
-        if is_prefill:
-            result = self.flashinfer_active_wrapper.forward(
-                q,
-                (key_cache, value_cache),
-                causal=True,
-                **kwargs,
-            )
-        else:
-            result = self.flashinfer_active_wrapper.forward(
-                q,
-                (key_cache, value_cache),
-                **kwargs,
-            )
-        return result
 
     def get_topk_for_sparse(
         self,
@@ -758,53 +679,11 @@ class MiniCPMSparseBackend(AttentionBackend):
             return ret
         else:
             metadata = self.forward_metadata
-
-            if self._use_cuda_graph_buffers:
-                get_compress_k_v2(
-                    layer=layer,
-                    forward_batch=forward_batch,
-                    metadata=metadata,
-                    full_compressed_k1=self.decode_cuda_graph_metadata["compress_k1"][
-                        : forward_batch.batch_size
-                        * self.max_context_len
-                        // self.k1_kernel_stride,
-                        :,
-                        :,
-                    ],
-                    full_compressed_k2=self.decode_cuda_graph_metadata["compress_k2"][
-                        : forward_batch.batch_size
-                        * self.max_context_len
-                        // self.k2_kernel_stride,
-                        :,
-                        :,
-                    ],
-                    max_context_length=self.max_context_len,
-                    k1_kernel_size=self.k1_kernel_size,
-                    k1_kernel_stride=self.k1_kernel_stride,
-                    k2_kernel_size=self.k2_kernel_size,
-                    k2_kernel_stride=self.k2_kernel_stride,
-                    padded=self.minicpm_split_stage1,
-                )
-            else:
-                compressed_k, compressed_k2 = allocate_and_compress_keys(
-                    layer=layer,
-                    forward_batch=forward_batch,
-                    metadata=metadata,
-                    k1_token_nums=forward_batch.batch_size
-                    * self.max_context_len
-                    // self.k1_kernel_stride,
-                    k2_token_nums=forward_batch.batch_size
-                    * self.max_context_len
-                    // self.k2_kernel_stride,
-                    k1_kernel_size=self.k1_kernel_size,
-                    k1_kernel_stride=self.k1_kernel_stride,
-                    k2_kernel_size=self.k2_kernel_size,
-                    k2_kernel_stride=self.k2_kernel_stride,
-                    dtype=query_states.dtype,
-                    device=self.device,
-                    max_context_length=self.max_context_len,
-                    minicpm_split_stage1=self.minicpm_split_stage1,
-                )
+            compressed_k, compressed_k2 = self._compress_decode_keys(
+                query_states,
+                layer,
+                forward_batch,
+            )
 
             topk_metadata = _build_decode_topk_metadata(
                 forward_batch=forward_batch,
@@ -818,53 +697,22 @@ class MiniCPMSparseBackend(AttentionBackend):
             max_seqlen_in_batch_k = topk_metadata["max_seqlen_k"]
             query_states = topk_metadata["query_states"]
 
-            if self._use_cuda_graph_buffers:
-                ret = self.sparse_get_topk_impl(
-                    query_states,
-                    cu_seqlens_q,
-                    cu_seqlens_k,
-                    max_seqlen_in_batch_q,
-                    max_seqlen_in_batch_k,
-                    no_rope_param=no_rope_param,
-                    compressed_k=self.decode_cuda_graph_metadata["compress_k1"][
-                        : forward_batch.batch_size
-                        * self.max_context_len
-                        // self.k1_kernel_stride,
-                        :,
-                        :,
-                    ],
-                    compressed_cu_seqlens=metadata.k1.cu_seqlens,
-                    compressed_k2=self.decode_cuda_graph_metadata["compress_k2"][
-                        : forward_batch.batch_size
-                        * self.max_context_len
-                        // self.k2_kernel_stride,
-                        :,
-                        :,
-                    ],
-                    compressed_cu_seqlens2=metadata.k2.cu_seqlens,
-                    fused_kernel=self._get_fused_topk_kernel(
-                        forward_batch.batch_size,
-                        is_prefill=False,
-                    ),
-                )
-
-            else:
-                ret = self.sparse_get_topk_impl(
-                    query_states,
-                    cu_seqlens_q,
-                    cu_seqlens_k,
-                    max_seqlen_in_batch_q,
-                    max_seqlen_in_batch_k,
-                    no_rope_param=no_rope_param,
-                    compressed_k=compressed_k,
-                    compressed_cu_seqlens=metadata.k1.cu_seqlens,
-                    compressed_k2=compressed_k2,
-                    compressed_cu_seqlens2=metadata.k2.cu_seqlens,
-                    fused_kernel=self._get_fused_topk_kernel(
-                        forward_batch.batch_size,
-                        is_prefill=False,
-                    ),
-                )
+            ret = self.sparse_get_topk_impl(
+                query_states,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_in_batch_q,
+                max_seqlen_in_batch_k,
+                no_rope_param=no_rope_param,
+                compressed_k=compressed_k,
+                compressed_cu_seqlens=metadata.k1.cu_seqlens,
+                compressed_k2=compressed_k2,
+                compressed_cu_seqlens2=metadata.k2.cu_seqlens,
+                fused_kernel=self._get_fused_topk_kernel(
+                    forward_batch.batch_size,
+                    is_prefill=False,
+                ),
+            )
 
         return ret
 
@@ -970,6 +818,10 @@ class MiniCPMSparseBackend(AttentionBackend):
             raise NotImplementedError(
                 "MiniCPM backend does not support cross attention"
             )
+        if layer.sliding_window_size not in (None, -1):
+            raise NotImplementedError(
+                "MiniCPM backend does not support sliding-window attention"
+            )
         if forward_batch.forward_mode.is_draft_extend_v2():
             raise NotImplementedError(
                 "MiniCPM backend does not support draft extend mode"
@@ -978,52 +830,34 @@ class MiniCPMSparseBackend(AttentionBackend):
         if k is not None:
             assert v is not None
             if save_kv_cache:
-                cache_loc = forward_batch.out_cache_loc
-                self.token_to_kv_pool.set_kv_buffer(
-                    layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+                self.flash_attn_backend.write_mha_kv_cache(
+                    layer,
+                    forward_batch.out_cache_loc,
+                    k,
+                    v,
+                    k_scale=layer.k_scale,
+                    v_scale=layer.v_scale,
                 )
 
-        # Use precomputed metadata across all layers
         metadata = self.forward_metadata
-
-        # Calculate window size (can be moved to metadata if layer properties don't change)
-        # we don't do layer.sliding_window_size - 1 since in model.get_attention_sliding_window_size() we already - 1
-        # here is two side inclusive
-        is_swa_layer = (
-            layer.sliding_window_size is not None and layer.sliding_window_size > -1
+        q, q_rope, k_rope, k_descale, v_descale = (
+            self.flash_attn_backend.prepare_paged_mha_query(
+                q,
+                q_rope,
+                k_rope,
+                layer,
+                logical_batch_size=forward_batch.batch_size,
+                kv_head_num=layer.tp_k_head_num,
+                is_prefill=True,
+            )
         )
-        window_size = (layer.sliding_window_size, 0) if is_swa_layer else (-1, -1)
-        k_descale, v_descale = None, None
-        # only use kv scaling if: 1) fp8 kv is explicitly enabled, 2) RadixAttention
-        # has corresponding quantization method so that layer.k_scale is not None,
-        # 3) layer.head_dim <= 256 since fa3 kernel require fp16 and bf16 data type in this case,
-        # 4) fa_impl_ver != 4 since fa4 does not currently support fp8 queries and keys.
-        if (
-            self.kv_cache_dtype_str != "auto"
-            and layer.head_dim <= 256
-            and self.fa_impl_ver != 4
-        ):
-            if layer.k_scale is not None:
-                descale_shape = (forward_batch.batch_size, layer.tp_k_head_num)
-                k_descale = layer.k_scale.expand(descale_shape)
-                v_descale = layer.v_scale.expand(descale_shape)
-            q = q.to(self.kv_cache_dtype)
-            q_rope = q_rope.to(self.kv_cache_dtype) if q_rope is not None else None
-            k_rope = k_rope.to(self.kv_cache_dtype) if k_rope is not None else None
-        # MiniCPM backend does not support cross attention or encoder-only attention
-        causal = True
-
-        kwargs = {}
-        if sinks is not None:
-            kwargs["sinks"] = sinks
-
-        # Get the appropriate page table (without local attention or SWA support)
         page_table = metadata.page_table
         cache_seqlens = metadata.cache_seqlens_int32
         cu_seqlens_k = metadata.cu_seqlens_k
 
         bs = forward_batch.batch_size
-        if max(forward_batch.seq_lens_cpu) >= self.dense_len:
+        dense_branch = metadata.sparse_batch_size == 0
+        if not dense_branch:
             q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
             topk_idx = self.get_topk_for_sparse(
                 q_reshaped, k, v, q.shape[0], layer, forward_batch
@@ -1047,7 +881,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             total_k1 = self.forward_metadata.k1.cu_seqlens_cpu[-1]
             total_k2 = self.forward_metadata.k2.cu_seqlens_cpu[-1]
 
-            full_compressed_k1_ext, full_compressed_k2_ext = allocate_and_compress_keys(
+            allocate_and_compress_keys(
                 layer=layer,
                 forward_batch=forward_batch,
                 metadata=self.forward_metadata,
@@ -1063,7 +897,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 minicpm_split_stage1=self.minicpm_split_stage1,
             )
 
-        q_reshaped = q.contiguous().view(-1, self.heads_per_group, layer.head_dim)
+        dense_layout_spans = []
         if metadata.sparse_batch_size < bs:
             # copy dense page table for dense bs
             dense_bs_list = [i for i in range(bs) if i not in metadata.sparse_bs_list]
@@ -1081,8 +915,8 @@ class MiniCPMSparseBackend(AttentionBackend):
                     sparse_page_table_idx_end - sparse_page_table_idx_start,
                 )
 
-                ps = metadata.sparse_cu_seqlens_q_cpu[sparse_page_table_idx_start]
-                len_ = (
+                ps = int(metadata.sparse_cu_seqlens_q_cpu[sparse_page_table_idx_start])
+                len_ = int(
                     metadata.sparse_cu_seqlens_q_cpu[sparse_page_table_idx_start + 1]
                     - ps
                 )
@@ -1091,18 +925,21 @@ class MiniCPMSparseBackend(AttentionBackend):
                 ), "dense bs seqlen mismatch {} vs {}".format(
                     len_, forward_batch.extend_seq_lens_cpu[dense_bs]
                 )
+                dense_layout_spans.append((ps, len_))
                 group_num = self.head_group_num
-                q_end = ps + group_num * len_
-                t = q_reshaped[ps:q_end].clone()
-                q_reshaped[ps:q_end] = (
-                    t.view(len_, group_num, self.heads_per_group, layer.head_dim)
-                    .transpose(0, 1)
-                    .reshape(-1, self.heads_per_group, layer.head_dim)
-                )
                 for group in range(group_num):
                     metadata.sparse_page_table[
                         sparse_page_table_idx_start + group, :kv_len
                     ] = (page_table[dense_bs, :kv_len] * group_num + group)
+
+        q_by_head_group = q.contiguous().view(-1, self.heads_per_group, layer.head_dim)
+        _transpose_head_group_layout(
+            q_by_head_group,
+            dense_layout_spans,
+            head_group_num=self.head_group_num,
+            heads_per_group=self.heads_per_group,
+            to_group_major=True,
+        )
 
         metadata.sparse_cache_seqlens_int32 = (
             (metadata.sparse_page_table != 0)
@@ -1118,90 +955,31 @@ class MiniCPMSparseBackend(AttentionBackend):
             (1, 0),
         )
 
-        key_cache, value_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
-
-        key_cache = key_cache.view(
-            -1,
-            self.page_size,
-            layer.tp_k_head_num // self.head_group_num,
-            layer.head_dim,
-        )
-        value_cache = value_cache.view(
-            -1,
-            self.page_size,
-            layer.tp_v_head_num // self.head_group_num,
-            layer.head_dim,
+        key_cache, value_cache = self.flash_attn_backend.get_paged_mha_kv_cache(
+            layer,
+            head_group_num=self.head_group_num,
         )
 
-        q_by_head_group = q.contiguous().view(-1, self.heads_per_group, layer.head_dim)
-        if self.use_flashinfer:
-            if sinks is not None:
-                raise NotImplementedError(
-                    "minicpm_flashinfer does not support attention sinks"
-                )
-            if not self.flashinfer_prefill_planned:
-                self._prepare_flashinfer(metadata, is_prefill=True)
-                self.flashinfer_prefill_planned = True
-            result = self._forward_flashinfer(
-                q_by_head_group,
-                key_cache,
-                value_cache,
-                metadata,
-                layer,
-                is_prefill=True,
-            )
-        else:
-            result = flash_attn_with_kvcache(
-                q=q_by_head_group,
-                k_cache=key_cache,
-                v_cache=value_cache,
-                page_table=metadata.sparse_page_table,
-                cache_seqlens=metadata.sparse_cache_seqlens_int32,
-                cu_seqlens_q=metadata.sparse_cu_seqlens_q,
-                cu_seqlens_k_new=metadata.sparse_cu_seqlens_k,
-                max_seqlen_q=metadata.sparse_max_seq_len_q,
-                softmax_scale=layer.scaling,
-                causal=causal,
-                window_size=window_size,
-                softcap=layer.logit_cap,
-                k_descale=k_descale,
-                v_descale=v_descale,
-                return_softmax_lse=False,
-                num_splits=self.num_splits,
-                ver=self.fa_impl_ver,
-                **kwargs,
-            )
+        result = self.attention_adapter.forward(
+            q_by_head_group,
+            key_cache,
+            value_cache,
+            metadata,
+            layer,
+            batch_size=bs,
+            is_prefill=True,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            sinks=sinks,
+        )
 
-        if metadata.sparse_batch_size < bs:
-            dense_bs_list = [i for i in range(bs) if i not in metadata.sparse_bs_list]
-            for dense_bs in dense_bs_list:
-                sparse_page_table_idx_start = metadata.old_bs_to_new_bs_range[dense_bs]
-                sparse_page_table_idx_end = metadata.old_bs_to_new_bs_range[
-                    dense_bs + 1
-                ]
-                assert (
-                    sparse_page_table_idx_end - sparse_page_table_idx_start
-                    == self.head_group_num
-                ), f"dense bs should have {self.head_group_num} head_group"
-
-                ps = metadata.sparse_cu_seqlens_q_cpu[sparse_page_table_idx_start]
-                len_ = (
-                    metadata.sparse_cu_seqlens_q_cpu[sparse_page_table_idx_start + 1]
-                    - ps
-                )
-                assert (
-                    len_ == forward_batch.extend_seq_lens_cpu[dense_bs]
-                ), "dense bs seqlen mismatch {} vs {}".format(
-                    len_, forward_batch.extend_seq_lens_cpu[dense_bs]
-                )
-                group_num = self.head_group_num
-                result_end = ps + group_num * len_
-                t = result[ps:result_end].clone()
-                result[ps:result_end] = (
-                    t.view(group_num, len_, self.heads_per_group, layer.head_dim)
-                    .transpose(0, 1)
-                    .reshape(-1, self.heads_per_group, layer.head_dim)
-                )
+        _transpose_head_group_layout(
+            result,
+            dense_layout_spans,
+            head_group_num=self.head_group_num,
+            heads_per_group=self.heads_per_group,
+            to_group_major=False,
+        )
 
         return result.view(-1, layer.tp_q_head_num * layer.head_dim)
 
@@ -1218,152 +996,112 @@ class MiniCPMSparseBackend(AttentionBackend):
         k_rope: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # Check for unsupported features
         if layer.is_cross_attention:
             raise NotImplementedError(
                 "MiniCPM backend does not support cross attention"
             )
-        # MiniCPM does not support local attention
+        if layer.sliding_window_size not in (None, -1):
+            raise NotImplementedError(
+                "MiniCPM backend does not support sliding-window attention"
+            )
 
         bs = forward_batch.batch_size
         if k is not None:
             assert v is not None
             if save_kv_cache:
-                cache_loc = forward_batch.out_cache_loc
-                self.token_to_kv_pool.set_kv_buffer(
-                    layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+                self.flash_attn_backend.write_mha_kv_cache(
+                    layer,
+                    forward_batch.out_cache_loc,
+                    k,
+                    v,
+                    k_scale=layer.k_scale,
+                    v_scale=layer.v_scale,
                 )
 
-        # Use precomputed metadata across all layers
         metadata = self.forward_metadata
-
-        # Calculate window size (can be moved to metadata if layer properties don't change)
-        # we don't do layer.sliding_window_size - 1 since in model.get_attention_sliding_window_size() we already - 1
-        # here is two side inclusive
-        is_swa_layer = (
-            layer.sliding_window_size is not None and layer.sliding_window_size > -1
+        q, q_rope, k_rope, k_descale, v_descale = (
+            self.flash_attn_backend.prepare_paged_mha_query(
+                q,
+                q_rope,
+                k_rope,
+                layer,
+                logical_batch_size=bs,
+                kv_head_num=layer.tp_k_head_num,
+                is_prefill=False,
+            )
         )
-        window_size = (layer.sliding_window_size, 0) if is_swa_layer else (-1, -1)
-
-        # MiniCPM backend does not support cross attention or encoder-only attention
-        causal = True
-
-        kwargs = {}
-        if sinks is not None:
-            kwargs["sinks"] = sinks
-
-        k_descale, v_descale = None, None
-        # only use kv scaling if: 1) fp8 kv is explicitly enabled, 2) RadixAttention
-        # has corresponding quantization method so that layer.k_scale is not None,
-        # 3) layer.head_dim <= 256 since fa3 kernel require fp16 and bf16 data type in this case.
-        if self.kv_cache_dtype_str != "auto" and layer.head_dim <= 256:
-            if layer.k_scale is not None:
-                descale_shape = (forward_batch.batch_size, layer.tp_k_head_num)
-                k_descale = layer.k_scale.expand(descale_shape)
-                v_descale = layer.v_scale.expand(descale_shape)
-            q = q.to(self.kv_cache_dtype)
-            q_rope = q_rope.to(self.kv_cache_dtype) if q_rope is not None else None
-            k_rope = k_rope.to(self.kv_cache_dtype) if k_rope is not None else None
-        # Do multi-head attention (without cross-attention or local attention support)
-
-        key_cache, value_cache = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
-        key_cache = key_cache.view(
-            -1, self.page_size, layer.tp_k_head_num, layer.head_dim
-        )
-        value_cache = value_cache.view(
-            -1, self.page_size, layer.tp_v_head_num, layer.v_head_dim
+        key_cache, value_cache = self.flash_attn_backend.get_paged_mha_kv_cache(
+            layer,
+            head_group_num=self.head_group_num,
         )
 
         page_table = metadata.page_table
         cache_seqlens = metadata.cache_seqlens_int32
-        max_seqlen_q = metadata.max_seq_len_q
         q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
 
-        topk_idx = self.get_topk_for_sparse(
-            q_reshaped.unsqueeze(0),
-            k.unsqueeze(0),
-            v.unsqueeze(0),
-            1,
-            layer,
-            forward_batch,
-            False,
-        )
-        sparse_page_table = get_block_table_v3(
-            topk_idx,
-            page_table,
-            metadata.token_to_bs,
-            cache_seqlens,
-            cache_seqlens,
-            head_group_num=self.head_group_num,
-            block_size=self.block_size,
-        ).reshape(-1, self.num_sparse_topk_tokens)
-
         sparse_rows = self.head_group_num * bs
-        metadata.sparse_page_table[:sparse_rows, : self.num_sparse_topk_tokens] = (
-            sparse_page_table[:, : self.num_sparse_topk_tokens]
+        dense_branch = (
+            not self._use_cuda_graph_buffers
+            and max(forward_batch.seq_lens_cpu) < self.dense_len
         )
+        if dense_branch:
+            self._compress_decode_keys(q_reshaped, layer, forward_batch)
+            for request_idx in range(bs):
+                kv_len = int(forward_batch.seq_lens_cpu[request_idx])
+                for group in range(self.head_group_num):
+                    row = request_idx * self.head_group_num + group
+                    metadata.sparse_page_table[row, :kv_len] = (
+                        page_table[request_idx, :kv_len] * self.head_group_num + group
+                    )
+        else:
+            topk_idx = self.get_topk_for_sparse(
+                q_reshaped.unsqueeze(0),
+                k.unsqueeze(0),
+                v.unsqueeze(0),
+                1,
+                layer,
+                forward_batch,
+                False,
+            )
+            sparse_page_table = get_block_table_v3(
+                topk_idx,
+                page_table,
+                metadata.token_to_bs,
+                cache_seqlens,
+                cache_seqlens,
+                head_group_num=self.head_group_num,
+                block_size=self.block_size,
+            ).reshape(-1, self.num_sparse_topk_tokens)
+            metadata.sparse_page_table[:sparse_rows, : self.num_sparse_topk_tokens] = (
+                sparse_page_table[:, : self.num_sparse_topk_tokens]
+            )
 
         q_reshaped_by_head_group = q_reshaped.reshape(
             -1, self.heads_per_group, layer.head_dim
         )
         assert self.page_size == 1
-        key_cache_by_head_group = key_cache.reshape(
-            -1,
-            self.page_size,
-            layer.tp_k_head_num // self.head_group_num,
-            layer.head_dim,
+        result = self.attention_adapter.forward(
+            q_reshaped_by_head_group,
+            key_cache,
+            value_cache,
+            metadata,
+            layer,
+            batch_size=bs,
+            is_prefill=False,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            sinks=sinks,
         )
-        value_cache_by_head_group = value_cache.reshape(
-            -1,
-            self.page_size,
-            layer.tp_v_head_num // self.head_group_num,
-            layer.head_dim,
-        )
-
-        sparse_cache_seqlens = metadata.sparse_cache_seqlens_int32
-        sparse_cu_seqlens_k = metadata.sparse_cu_seqlens_k
-        sparse_cu_seqlens_q = metadata.sparse_cu_seqlens_q
-
-        if self.use_flashinfer:
-            if sinks is not None:
-                raise NotImplementedError(
-                    "minicpm_flashinfer does not support attention sinks"
-                )
-            result = self._forward_flashinfer(
-                q_reshaped_by_head_group,
-                key_cache_by_head_group,
-                value_cache_by_head_group,
-                metadata,
-                layer,
-                is_prefill=False,
-            )
-        else:
-            result = flash_attn_with_kvcache(
-                q=q_reshaped_by_head_group,
-                k_cache=key_cache_by_head_group,
-                v_cache=value_cache_by_head_group,
-                page_table=metadata.sparse_page_table,
-                cache_seqlens=sparse_cache_seqlens,
-                cu_seqlens_q=sparse_cu_seqlens_q,
-                cu_seqlens_k_new=sparse_cu_seqlens_k,
-                max_seqlen_q=max_seqlen_q,
-                softmax_scale=layer.scaling,
-                causal=causal,
-                window_size=window_size,
-                softcap=layer.logit_cap,
-                k_descale=k_descale,
-                v_descale=v_descale,
-                return_softmax_lse=False,
-                num_splits=self.num_splits,
-                ver=self.fa_impl_ver,
-                **kwargs,
-            )
 
         return result.view(-1, layer.tp_q_head_num * layer.v_head_dim)
 
     def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
-        self.base_backend.init_cuda_graph_state(max_bs, max_num_tokens)
-        buffers = self.base_backend.decode_cuda_graph_metadata
+        self.flash_attn_backend.init_cuda_graph_state(max_bs, max_num_tokens)
+        self.attention_adapter.init_cuda_graph_state(
+            max_bs,
+            max_bs * self.head_group_num,
+        )
+        buffers = self.flash_attn_backend.decode_cuda_graph_metadata
         self.decode_cuda_graph_metadata = buffers
         sparse_max_num_pages = (
             max(self.dense_len, self.num_sparse_topk_tokens) + self.page_size - 1
@@ -1470,19 +1208,20 @@ class MiniCPMSparseBackend(AttentionBackend):
             forward_batch.batch_size,
             is_prefill=False,
         )
-        self.base_backend.init_forward_metadata_out_graph(forward_batch, in_capture)
-        metadata = self.base_backend.forward_metadata
+        self.flash_attn_backend.init_forward_metadata_out_graph(
+            forward_batch, in_capture
+        )
+        metadata = self.flash_attn_backend.forward_metadata
         if in_capture:
             self._bind_sparse_graph_metadata(forward_batch, metadata)
         else:
             self._replay_sparse_graph_metadata(forward_batch, metadata)
-        if self.use_flashinfer:
-            self._prepare_flashinfer(
-                metadata,
-                is_prefill=False,
-                graph=True,
-                in_capture=in_capture,
-            )
+        self.attention_adapter.prepare_forward(
+            metadata,
+            is_prefill=False,
+            graph=True,
+            in_capture=in_capture,
+        )
         self.forward_metadata = metadata
 
     def _build_sparse_decode_replay_metadata(
@@ -1637,4 +1376,4 @@ class MiniCPMSparseBackend(AttentionBackend):
             metadata.cache_seqlens_int32_stage1[real_bs:].zero_()
 
     def get_cuda_graph_seq_len_fill_value(self):
-        return self.base_backend.get_cuda_graph_seq_len_fill_value()
+        return self.flash_attn_backend.get_cuda_graph_seq_len_fill_value()
