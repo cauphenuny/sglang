@@ -448,6 +448,19 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                     )["attention_backend"],
                     "fa4",
                 )
+            with patch.object(
+                overrides_module,
+                "is_blackwell_supported",
+                return_value=False,
+            ):
+                split_overrides = self._minicpm_overrides(
+                    "MiniCPMSALAForCausalLM",
+                    sparse_attention=True,
+                    prefill_attention_backend="minicpm_flashattn",
+                    decode_attention_backend="minicpm_flashattn",
+                )
+                self.assertEqual(split_overrides["prefill_attention_backend"], "fa3")
+                self.assertEqual(split_overrides["decode_attention_backend"], "fa3")
 
     def _construct(self, arch, model_type, config_extra=None, **server_kwargs):
         from sglang.srt.server_args import ServerArgs
