@@ -121,11 +121,12 @@ class MiniCPMSparseBackend(AttentionBackend):
                 "MiniCPM model must have sparse attention enabled. "
                 "Please ensure the model config has MiniCPM sparse attention enabled."
             )
-        self.kernel_size = hf_config.sparse_kernel_size
-        self.kernel_stride = hf_config.sparse_kernel_stride
-        self.init_blocks = hf_config.sparse_init_blocks
-        self.block_size = hf_config.sparse_block_size
-        self.window_size = hf_config.sparse_window_size
+        sparse_config = hf_config.sparse_config
+        self.kernel_size = sparse_config["kernel_size"]
+        self.kernel_stride = sparse_config["kernel_stride"]
+        self.init_blocks = sparse_config["init_blocks"]
+        self.block_size = sparse_config["block_size"]
+        self.window_size = sparse_config["window_size"]
         if (
             self.kernel_stride <= 0
             or self.kernel_size <= 0
@@ -150,10 +151,10 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.req_to_sparse_k2_token = self.req_to_token_pool.req_to_sparse_k2_token
         self.minicpm_dense_as_sparse = envs.SGLANG_MINICPM_DENSE_AS_SPARSE.get()
         self.dense_len = (
-            0 if self.minicpm_dense_as_sparse else hf_config.sparse_dense_len
+            0 if self.minicpm_dense_as_sparse else sparse_config["dense_len"]
         )
-        self.config_dense_len = hf_config.sparse_dense_len
-        topk = hf_config.sparse_topk
+        self.config_dense_len = sparse_config["dense_len"]
+        topk = sparse_config["topk"]
         self.local_blocks = self.window_size // self.block_size  # local_blocks
         self.sparse_topk = topk + (self.window_size // self.block_size)
         self.num_sparse_topk_tokens = self.block_size * self.sparse_topk

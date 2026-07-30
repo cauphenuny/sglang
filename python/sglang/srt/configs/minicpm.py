@@ -68,18 +68,9 @@ class MiniCPMHybridConfig(PretrainedConfig):
         qk_norm=True,
         attn_use_rope=True,
         attn_use_output_gate=False,
-        # Sparse attention config fields
-        sparse_block_size=32,
-        sparse_dense_len=512,
-        sparse_init_blocks=1,
-        sparse_kernel_size=32,
-        sparse_kernel_stride=16,
-        sparse_topk=8,
-        sparse_window_size=64,
+        sparse_config=None,
         **kwargs,
     ):
-        # Pop structured MiniCPM fields before PretrainedConfig stores unknown kwargs.
-        sparse_config = kwargs.pop("sparse_config", None)
         for unused_field in ("minicpm4", "lightning", "sparse_use_nope"):
             kwargs.pop(unused_field, None)
 
@@ -143,36 +134,7 @@ class MiniCPMHybridConfig(PretrainedConfig):
         self.qk_norm = qk_norm
         self.attn_use_rope = attn_use_rope
         self.attn_use_output_gate = attn_use_output_gate
-        # Sparse attention config fields
-        self.sparse_block_size = sparse_block_size
-        self.sparse_dense_len = sparse_dense_len
-        self.sparse_init_blocks = sparse_init_blocks
-        self.sparse_kernel_size = sparse_kernel_size
-        self.sparse_kernel_stride = sparse_kernel_stride
-        self.sparse_topk = sparse_topk
-        self.sparse_window_size = sparse_window_size
-        # Load sparse_config from original config if available (for backward compatibility)
-        self.has_sparse_config = sparse_config is not None
-        if sparse_config is not None:
-            self.sparse_block_size = sparse_config.get(
-                "block_size", self.sparse_block_size
-            )
-            self.sparse_dense_len = sparse_config.get(
-                "dense_len", self.sparse_dense_len
-            )
-            self.sparse_init_blocks = sparse_config.get(
-                "init_blocks", self.sparse_init_blocks
-            )
-            self.sparse_kernel_size = sparse_config.get(
-                "kernel_size", self.sparse_kernel_size
-            )
-            self.sparse_kernel_stride = sparse_config.get(
-                "kernel_stride", self.sparse_kernel_stride
-            )
-            self.sparse_topk = sparse_config.get("topk", self.sparse_topk)
-            self.sparse_window_size = sparse_config.get(
-                "window_size", self.sparse_window_size
-            )
+        self.sparse_config = sparse_config
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -221,7 +183,7 @@ class MiniCPMHybridConfig(PretrainedConfig):
     @property
     def has_minicpm_sparse_attention(self) -> bool:
         """Check if this config has MiniCPM sparse attention layers."""
-        return self.has_sparse_config and any(
+        return self.sparse_config is not None and any(
             mt == "minicpm4" for mt in self.mixer_types
         )
 

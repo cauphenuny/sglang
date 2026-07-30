@@ -90,13 +90,15 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         )
         hf_config = SimpleNamespace(
             has_minicpm_sparse_attention=True,
-            sparse_kernel_size=32,
-            sparse_kernel_stride=16,
-            sparse_init_blocks=1,
-            sparse_block_size=64,
-            sparse_window_size=64,
-            sparse_dense_len=128,
-            sparse_topk=1,
+            sparse_config={
+                "kernel_size": 32,
+                "kernel_stride": 16,
+                "init_blocks": 1,
+                "block_size": 64,
+                "window_size": 64,
+                "dense_len": 128,
+                "topk": 1,
+            },
         )
         model_config = SimpleNamespace(
             hf_config=hf_config,
@@ -211,13 +213,15 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         )
         hf_config = SimpleNamespace(
             has_minicpm_sparse_attention=True,
-            sparse_kernel_size=32,
-            sparse_kernel_stride=16,
-            sparse_init_blocks=1,
-            sparse_block_size=64,
-            sparse_window_size=64,
-            sparse_dense_len=128,
-            sparse_topk=1,
+            sparse_config={
+                "kernel_size": 32,
+                "kernel_stride": 16,
+                "init_blocks": 1,
+                "block_size": 64,
+                "window_size": 64,
+                "dense_len": 128,
+                "topk": 1,
+            },
         )
         model_runner = SimpleNamespace(
             dtype=torch.float16,

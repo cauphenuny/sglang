@@ -40,6 +40,23 @@ def test_minicpm_empty_mixer_types_default_to_full_attention():
     assert config.full_attention_layer_ids == [0, 1, 2]
 
 
+def test_minicpm_sparse_config_uses_nested_fields_only():
+    sparse_config = {
+        "block_size": 64,
+        "dense_len": 8192,
+        "init_blocks": 1,
+        "kernel_size": 32,
+        "kernel_stride": 16,
+        "topk": 64,
+        "window_size": 2048,
+    }
+    config = MiniCPMHybridConfig(sparse_config=sparse_config)
+
+    assert config.has_minicpm_sparse_attention
+    assert config.sparse_config == sparse_config
+    assert not hasattr(config, "sparse_dense_len")
+
+
 def test_minicpm_short_mixer_pattern_repeats_to_layer_count():
     config = MiniCPMHybridConfig(
         num_hidden_layers=5,
