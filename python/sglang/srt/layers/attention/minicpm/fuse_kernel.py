@@ -12,35 +12,6 @@ _pass_configs = {
 }
 
 
-def _bucket_size(
-    val: int,
-    buckets=(
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-        65536,
-    ),
-) -> int:
-    """Round up value to the next bucket size for caching efficiency."""
-    for b in buckets:
-        if val <= b:
-            return b
-    return val  # If larger than all buckets, use actual value
-
-
 @tilelang.jit(pass_configs=_pass_configs)
 def _fused_attn_pooling_online_topk(
     batch_size: int,

@@ -6,7 +6,6 @@ combining both backend-agnostic sparse attention components and kernel utilities
 
 from __future__ import annotations
 
-import logging
 import math
 from typing import TYPE_CHECKING, Optional
 
@@ -30,11 +29,8 @@ from sglang.srt.layers.attention.minicpm.sparse_kernels import (
 )
 from sglang.srt.model_executor.forward_context import get_token_to_kv_pool
 
-logger = logging.getLogger(__name__)
-
 
 def batched_gather(a, cu_seqlen_q, select):
-    #
     select_bs = len(select)
     select = torch.tensor(select, device="cpu")
     starts = cu_seqlen_q[select]
@@ -255,13 +251,10 @@ def compressed_attention(
     cu_seqlens_k: torch.Tensor,
     cu_seqlens_k2: torch.Tensor,
     max_seqlen_q: int,
-    # max_seqlen_k: int,
     max_context_len: int,
-    sm_scale: Optional[float] = None,
     init_blocks: int = 1,
     local_blocks: int = 2,
     cache_lens: Optional[torch.Tensor] = None,
-    total_q: int = -1,
     cu_seqlens_q_adjusted: Optional[torch.Tensor] = None,
     max_seqlen_q_adjusted: Optional[int] = None,
     minicpm_split_stage1: bool = False,
@@ -283,12 +276,9 @@ def compressed_attention(
         cu_seqlens_k: Cumulative sequence lengths for k, shape (batch_size + 1)
         cu_seqlens_k2: Cumulative sequence lengths for k2, shape (batch_size + 1)
         max_seqlen_q: Maximum sequence length in query
-        max_seqlen_k: Maximum sequence length in key
-        sm_scale: Softmax scaling factor (unused, kept for compatibility)
         init_blocks: Number of initial blocks to always attend to
         local_blocks: Number of local blocks to consider
         cache_lens: Cache lengths for each batch (optional)
-        total_q: Total number of queries (used for pooling)
         cu_seqlens_q_adjusted: Adjusted cumulative sequence lengths for query (for stage1 optimization)
         max_seqlen_q_adjusted: Adjusted maximum sequence length for query (for stage1 optimization)
 
@@ -306,27 +296,10 @@ def compressed_attention(
 
         is_prefilling = max_seqlen_q > 1
 
-        # Stage1 optimization: q_idx computation is no longer needed
         if is_prefilling:
             if cache_lens is None:
                 cache_lens = torch.zeros(batch_size, dtype=torch.int32, device=q.device)
-        #     q_idx = torch.cat(
-        #         [
-        #             (
-        #                 torch.arange(
-        #                     cu_seqlens_q[i + 1] - cu_seqlens_q[i], device=q.device
-        #                 )
-        #                 + cache_lens[i]
-        #             )
-        #             // block_size
-        #             for i in range(batch_size)
-        #         ],
-        #         dim=0,
-        #     )
-        # else:
-        #     q_idx = cache_lens // block_size
 
-        # split-stage1 -> bmm+softmax+reduce_sum
         if not is_prefilling and minicpm_split_stage1:
             batch_size = q.shape[0]
             k1_len = k.shape[0]
@@ -375,18 +348,14 @@ def compressed_attention(
             cu_seqlens_k,
             cache_lens,
             max_seqlen_q,
-            # max_seqlen_k,
             max_context_len,
             local_blocks=local_blocks,
             init_blocks=init_blocks,
             block_size=block_size,
             stride=kernel_stride,
-            total_q=total_q,
         )
 
         topk_idx = block_score.topk(topk, dim=-1).indices.sort(-1).values
-        # Stage1 optimization: skip q_idx filtering
-        # topk_idx[topk_idx > q_idx[None, :, None]] = -1
         topk_idx = topk_idx.to(torch.int32)
 
     return topk_idx
@@ -404,8 +373,6 @@ def compressed_attention_tilelang(
     cu_seqlens_k: torch.Tensor,
     cu_seqlens_k2: torch.Tensor,
     max_seqlen_q: int,
-    max_seqlen_k: int,
-    sm_scale: float = None,
     init_blocks: int = 1,
     local_blocks: int = 2,
     cache_lens=None,
@@ -422,27 +389,12 @@ def compressed_attention_tilelang(
         # Use max_seqlen_q > 1 to avoid .item() call for CUDA Graph compatibility
         is_prefilling = cache_lens is None or max_seqlen_q > 1
 
-        # Fixed max_cache_len for CUDA Graph compatibility (avoid .item() calls)
-        # max_cache_len = 525312  # 512k
-
-        # Get tensor dimensions
-        # q shape: [total_q_len, num_kv_heads, groups, head_dim] or [total_q_len, num_heads, head_dim]
-        # k shape: [total_k_len, num_kv_heads, head_dim]
         total_q_len = q.shape[0]
         num_kv_heads = k.shape[1]
         head_dim = k.shape[2]
 
-        # Determine num_heads and groups
-        # if q.dim() == 4:
-        #     groups = q.shape[2]
-        #     num_heads = num_kv_heads * groups
-        #     # Reshape q from [total_q_len, num_kv_heads, groups, head_dim] to [total_q_len * groups, num_kv_heads, head_dim]
-        #     q_kernel = q.transpose(1, 2).reshape(total_q_len * groups, num_kv_heads, head_dim).contiguous()
-        # else:
         num_heads = q.shape[1]
         groups = num_heads // num_kv_heads
-        # q shape: [total_q_len, num_heads, head_dim]
-        # Need to reshape to [total_q_len * groups, num_kv_heads, head_dim]
         q_kernel = q.view(total_q_len, num_kv_heads, groups, head_dim)
         q_kernel = (
             q_kernel.transpose(1, 2)
@@ -554,18 +506,13 @@ class CompressionLevelMetadata(msgspec.Struct):
     # Cumulative sequence lengths for compressed cache
     cu_seqlens: Optional[torch.Tensor] = None
     cu_seqlens_cpu: Optional[list[int]] = None
-    max_seq_len: int = 0
 
     # Token mapping table (request pool indices -> compressed cache tokens)
     table: Optional[torch.Tensor] = None
 
     # Compressed cache metadata
     history_compress_token_nums: Optional[torch.Tensor] = None
-    new_token_nums: Optional[torch.Tensor] = None
     cu_new_token_nums: Optional[torch.Tensor] = None
-    new_compress_token_nums: Optional[torch.Tensor] = None
-    cu_new_compress_token_nums: Optional[torch.Tensor] = None
-    total_compress_token_nums: Optional[torch.Tensor] = None
     cu_total_compress_token_nums: Optional[torch.Tensor] = None
 
 
@@ -680,20 +627,11 @@ def _compute_single_compression_metadata(
     )
 
     for i in range(bs):
-        # if forward_batch.forward_mode.is_extend_or_draft_extend_or_mixed():
-        #     seqlen_cpu[i] = max(
-        #         0,
-        #         (forward_batch.extend_seq_lens_cpu[i] - kernel_size)
-        #         // kernel_stride
-        #         + 1,
-        #     )
-        # else:
         seqlen_cpu[i] = max(
             0,
             (forward_batch.seq_lens_cpu[i] - kernel_size) // kernel_stride + 1,
         )
 
-    max_seq_len = seqlen_cpu.max().item()
     cu_seqlens_cpu = F.pad(
         torch.cumsum(seqlen_cpu, dim=0, dtype=torch.int32), (1, 0)
     ).tolist()
@@ -731,10 +669,6 @@ def _compute_single_compression_metadata(
         torch.zeros(1, device=new_token_nums.device, dtype=torch.int32),
     )
 
-    cu_new_compress_token_nums = F.pad(
-        torch.cumsum(new_compress_token_nums, dim=0, dtype=torch.int32), (1, 0)
-    )
-
     total_compress_token_nums = history_compress_token_nums + new_compress_token_nums
 
     cu_total_compress_token_nums = F.pad(
@@ -744,14 +678,9 @@ def _compute_single_compression_metadata(
     return {
         "cu_seqlens": cu_seqlens,
         "cu_seqlens_cpu": cu_seqlens_cpu,
-        "max_seq_len": max_seq_len,
         "token_table": token_table,
         "history_compress_token_nums": history_compress_token_nums,
-        "new_token_nums": new_token_nums,
         "cu_new_token_nums": cu_new_token_nums,
-        "new_compress_token_nums": new_compress_token_nums,
-        "cu_new_compress_token_nums": cu_new_compress_token_nums,
-        "total_compress_token_nums": total_compress_token_nums,
         "cu_total_compress_token_nums": cu_total_compress_token_nums,
     }
 
@@ -810,27 +739,17 @@ def _build_k1_k2_compression_metadata(
         "k1": CompressionLevelMetadata(
             cu_seqlens=k1_dict["cu_seqlens"],
             cu_seqlens_cpu=k1_dict["cu_seqlens_cpu"],
-            max_seq_len=k1_dict["max_seq_len"],
             table=k1_dict["token_table"],
             history_compress_token_nums=k1_dict["history_compress_token_nums"],
-            new_token_nums=k1_dict["new_token_nums"],
             cu_new_token_nums=k1_dict["cu_new_token_nums"],
-            new_compress_token_nums=k1_dict["new_compress_token_nums"],
-            cu_new_compress_token_nums=k1_dict["cu_new_compress_token_nums"],
-            total_compress_token_nums=k1_dict["total_compress_token_nums"],
             cu_total_compress_token_nums=k1_dict["cu_total_compress_token_nums"],
         ),
         "k2": CompressionLevelMetadata(
             cu_seqlens=k2_dict["cu_seqlens"],
             cu_seqlens_cpu=k2_dict["cu_seqlens_cpu"],
-            max_seq_len=k2_dict["max_seq_len"],
             table=k2_dict["token_table"],
             history_compress_token_nums=k2_dict["history_compress_token_nums"],
-            new_token_nums=k2_dict["new_token_nums"],
             cu_new_token_nums=k2_dict["cu_new_token_nums"],
-            new_compress_token_nums=k2_dict["new_compress_token_nums"],
-            cu_new_compress_token_nums=k2_dict["cu_new_compress_token_nums"],
-            total_compress_token_nums=k2_dict["total_compress_token_nums"],
             cu_total_compress_token_nums=k2_dict["cu_total_compress_token_nums"],
         ),
     }

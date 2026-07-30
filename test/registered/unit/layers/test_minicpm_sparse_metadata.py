@@ -15,6 +15,7 @@ from sglang.srt.layers.attention.minicpm.backend import (
 )
 from sglang.srt.layers.attention.minicpm.sparse_utils import CompressionLevelMetadata
 from sglang.test.ci.ci_register import register_cpu_ci
+from sglang.test.test_utils import CustomTestCase
 
 register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 
@@ -33,7 +34,7 @@ class _DeviceOffsetsMustNotBeRead:
         raise AssertionError("prefill layers must use scheduler-derived CPU offsets")
 
 
-class TestMiniCPMSparseMetadata(unittest.TestCase):
+class TestMiniCPMSparseMetadata(CustomTestCase):
     def test_head_group_layout_round_trip(self):
         tensor = torch.arange(10).reshape(5, 2, 1)
         original = tensor.clone()
@@ -389,6 +390,17 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             backend.decode_cuda_graph_metadata["compress_k1"].dtype,
             torch.float16,
         )
+        for level in ("k1", "k2"):
+            for field in (
+                "new_token_nums",
+                "new_compress_token_nums",
+                "cu_new_compress_token_nums",
+                "total_compress_token_nums",
+            ):
+                self.assertNotIn(
+                    f"{level}.{field}",
+                    backend.decode_cuda_graph_metadata,
+                )
 
     def test_compression_uses_configured_k1_k2_layout(self):
         """K1/K2 compression must honor checkpoint strides instead of fixed defaults."""
@@ -397,11 +409,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
         level = CompressionLevelMetadata(
             table=torch.empty(0),
             history_compress_token_nums=torch.empty(0),
-            new_token_nums=torch.empty(0),
             cu_new_token_nums=torch.empty(0),
-            new_compress_token_nums=torch.empty(0),
-            cu_new_compress_token_nums=torch.empty(0),
-            total_compress_token_nums=torch.empty(0),
             cu_total_compress_token_nums=torch.empty(0),
         )
         metadata = SimpleNamespace(
@@ -585,8 +593,6 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             result = backend.get_topk_for_sparse(
                 query_states=torch.empty(2, 1, 1),
                 key_states=torch.empty(2, 1, 1),
-                value_states=None,
-                query_length=None,
                 layer=layer,
                 forward_batch=forward_batch,
             )
@@ -630,15 +636,7 @@ class TestMiniCPMSparseMetadata(unittest.TestCase):
             self.assertEqual(
                 level.history_compress_token_nums.numel(), forward_batch.batch_size
             )
-            self.assertEqual(level.new_token_nums.numel(), forward_batch.batch_size)
-            self.assertEqual(
-                level.new_compress_token_nums.numel(), forward_batch.batch_size
-            )
-            self.assertEqual(
-                level.total_compress_token_nums.numel(), forward_batch.batch_size
-            )
             self.assertEqual(level.cu_new_token_nums.numel(), 4)
-            self.assertEqual(level.cu_new_compress_token_nums.numel(), 4)
             self.assertEqual(level.cu_total_compress_token_nums.numel(), 4)
 
 

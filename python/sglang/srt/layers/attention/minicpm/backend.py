@@ -35,7 +35,6 @@ from sglang.kernels.jit.minicpm_sala import (
     get_block_table_v3,
 )
 from sglang.srt.layers.attention.minicpm.fuse_kernel import (
-    _bucket_size,
     fused_attn_pooling_online_topk_decode,
     fused_attn_pooling_online_topk_prefill,
 )
@@ -199,7 +198,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         kernel_topk = max(8, kernel_topk)
         self.decode_fused_kernels = {}
         self.prefill_fused_kernels = {}
-        bucketed_pooled_k_len = _bucket_size(pooled_k_len)
+        bucketed_pooled_k_len = tilelang.math.next_power_of_2(pooled_k_len)
 
         pooling_block_stride = self.block_size // self.kernel_stride  # = 64 // 16 = 4
         pooling_pad_len = (
@@ -492,16 +491,9 @@ class MiniCPMSparseBackend(AttentionBackend):
         self,
         query_states,
         key_states,
-        value_states,
-        query_length,
         layer,
         forward_batch,
         is_prefill=True,
-        dropout=0.0,
-        softmax_scale=None,
-        no_rope_param=None,
-        past_key_value=None,
-        decode_batch_id=0,
     ):
         if is_prefill:
             all_sparse = (
@@ -559,7 +551,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                     cu_seqlens_k,
                     max_seqlen_in_batch_q,
                     max_seqlen_in_batch_k,
-                    no_rope_param=no_rope_param,
                     compressed_k=compressed_k,
                     compressed_cu_seqlens=metadata.k1.cu_seqlens,
                     compressed_k2=compressed_k2,
@@ -666,7 +657,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 cu_seqlens_k,
                 max_seqlen_in_batch_q,
                 max_seqlen_in_batch_k,
-                no_rope_param=no_rope_param,
                 compressed_k=compressed_k,
                 compressed_cu_seqlens=compressed_cu_seqlens,
                 compressed_k2=compressed_k2,
@@ -703,7 +693,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 cu_seqlens_k,
                 max_seqlen_in_batch_q,
                 max_seqlen_in_batch_k,
-                no_rope_param=no_rope_param,
                 compressed_k=compressed_k,
                 compressed_cu_seqlens=metadata.k1.cu_seqlens,
                 compressed_k2=compressed_k2,
@@ -723,8 +712,6 @@ class MiniCPMSparseBackend(AttentionBackend):
         cu_seqlens_k,
         max_seqlen_in_batch_q,
         max_seqlen_in_batch_k,
-        #    max_seqlen_k1,
-        no_rope_param=None,
         compressed_k=None,
         compressed_cu_seqlens=None,
         compressed_k2=None,
@@ -747,11 +734,7 @@ class MiniCPMSparseBackend(AttentionBackend):
 
         if not self.minicpm_fuse_topk:
             topk_idx = compressed_attention(
-                (
-                    query_layer
-                    if no_rope_param is None
-                    else no_rope_param["query_states_no_rope"]
-                ),
+                query_layer,
                 compressed_k,
                 compressed_k2,
                 self.kernel_size,
@@ -762,24 +745,17 @@ class MiniCPMSparseBackend(AttentionBackend):
                 compressed_cu_seqlens,
                 compressed_cu_seqlens2,
                 max_seqlen_in_batch_q,
-                # self.max_context_len // self.kernel_size,
                 self.max_context_len,
-                None,
                 init_blocks=self.init_blocks,
                 local_blocks=self.local_blocks,
                 cache_lens=cache_lens,
                 cu_seqlens_q_adjusted=self.forward_metadata.cu_seqlens_q_adjusted,
                 max_seqlen_q_adjusted=self.forward_metadata.max_seqlen_q_adjusted,
-                # block_score_buffer=self.forward_metadata.block_score_buffer
                 minicpm_split_stage1=self.minicpm_split_stage1,
             )
         else:
             topk_idx = compressed_attention_tilelang(
-                (
-                    query_layer
-                    if no_rope_param is None
-                    else no_rope_param["query_states_no_rope"]
-                ),
+                query_layer,
                 compressed_k,
                 compressed_k2,
                 self.kernel_size,
@@ -790,8 +766,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 compressed_cu_seqlens,
                 compressed_cu_seqlens2,
                 max_seqlen_in_batch_q,
-                self.forward_metadata.k1.max_seq_len,
-                None,
                 init_blocks=self.init_blocks,
                 local_blocks=self.local_blocks,
                 cache_lens=cache_lens,
@@ -831,7 +805,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             assert v is not None
             if save_kv_cache:
                 self.token_to_kv_pool.set_kv_buffer(
-                    layer, forward_batch.out_cache_loc, k, v, layer.k_scale, layer.v_scale
+                    layer,
+                    forward_batch.out_cache_loc,
+                    k,
+                    v,
+                    layer.k_scale,
+                    layer.v_scale,
                 )
 
         metadata = self.forward_metadata
@@ -854,7 +833,10 @@ class MiniCPMSparseBackend(AttentionBackend):
         if metadata.sparse_batch_size > 0:
             q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
             topk_idx = self.get_topk_for_sparse(
-                q_reshaped, k, v, q.shape[0], layer, forward_batch
+                query_states=q_reshaped,
+                key_states=k,
+                layer=layer,
+                forward_batch=forward_batch,
             )
 
             sparse_page_table_sparse_bs = get_block_table_v2(
@@ -1004,7 +986,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             assert v is not None
             if save_kv_cache:
                 self.token_to_kv_pool.set_kv_buffer(
-                    layer, forward_batch.out_cache_loc, k, v, layer.k_scale, layer.v_scale
+                    layer,
+                    forward_batch.out_cache_loc,
+                    k,
+                    v,
+                    layer.k_scale,
+                    layer.v_scale,
                 )
 
         metadata = self.forward_metadata
@@ -1029,13 +1016,11 @@ class MiniCPMSparseBackend(AttentionBackend):
         q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
 
         topk_idx = self.get_topk_for_sparse(
-            q_reshaped.unsqueeze(0),
-            k.unsqueeze(0),
-            v.unsqueeze(0),
-            1,
-            layer,
-            forward_batch,
-            False,
+            query_states=q_reshaped.unsqueeze(0),
+            key_states=k.unsqueeze(0),
+            layer=layer,
+            forward_batch=forward_batch,
+            is_prefill=False,
         )
         sparse_page_table = get_block_table_v3(
             topk_idx,
@@ -1105,9 +1090,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 "token_to_bs": torch.arange(
                     0, max_bs, dtype=torch.int32, device=self.device
                 ),
-                "token_pos_in_bs": torch.ones(
-                    max_bs, dtype=torch.int32, device=self.device
-                ),
                 "sparse_page_table": torch.zeros(
                     max_bs * self.head_group_num,
                     sparse_max_num_pages,
@@ -1148,19 +1130,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             buffers[f"{name}.table"] = torch.zeros(
                 max_bs, max_num_pages, dtype=torch.int32, device=self.device
             )
-            for field in (
-                "history_compress_token_nums",
-                "new_token_nums",
-                "new_compress_token_nums",
-                "total_compress_token_nums",
-            ):
-                buffers[f"{name}.{field}"] = torch.zeros(
-                    max_bs, dtype=torch.int32, device=self.device
-                )
+            buffers[f"{name}.history_compress_token_nums"] = torch.zeros(
+                max_bs, dtype=torch.int32, device=self.device
+            )
             for field in (
                 "cu_seqlens",
                 "cu_new_token_nums",
-                "cu_new_compress_token_nums",
                 "cu_total_compress_token_nums",
             ):
                 buffers[f"{name}.{field}"] = torch.zeros(
@@ -1239,9 +1214,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         metadata.sparse_cu_seqlens_q = buffers["sparse_cu_seqlens_q"][: sparse_rows + 1]
         metadata.sparse_cu_seqlens_k = buffers["sparse_cu_seqlens_k"][: sparse_rows + 1]
         metadata.token_to_bs = buffers["token_to_bs"][:bs]
-        metadata.token_pos_in_bs = buffers["token_pos_in_bs"][:bs]
         metadata.sparse_page_table = buffers["sparse_page_table"][:sparse_rows]
-        metadata.total_q = bs
 
         assume_kv_len = self.config_dense_len
         metadata.cu_seqlens_k.copy_(
@@ -1256,22 +1229,16 @@ class MiniCPMSparseBackend(AttentionBackend):
             level = CompressionLevelMetadata()
             setattr(metadata, name, level)
             level_len = max(0, (assume_kv_len - kernel_size) // kernel_stride + 1)
-            level.max_seq_len = level_len
             level.cu_seqlens = buffers[f"{name}.cu_seqlens"][: bs + 1]
             level.cu_seqlens.copy_(
                 torch.arange(bs + 1, device=self.device, dtype=torch.int32) * level_len
             )
             level.table = buffers[f"{name}.table"][:bs]
-            for field in (
-                "history_compress_token_nums",
-                "new_token_nums",
-                "new_compress_token_nums",
-                "total_compress_token_nums",
-            ):
-                setattr(level, field, buffers[f"{name}.{field}"][:bs])
+            level.history_compress_token_nums = buffers[
+                f"{name}.history_compress_token_nums"
+            ][:bs]
             for field in (
                 "cu_new_token_nums",
-                "cu_new_compress_token_nums",
                 "cu_total_compress_token_nums",
             ):
                 setattr(level, field, buffers[f"{name}.{field}"][: bs + 1])
@@ -1321,19 +1288,14 @@ class MiniCPMSparseBackend(AttentionBackend):
             ].fill_(float("-inf"))
             dst = getattr(metadata, name)
             src = compression_metadata[name]
-            for field in (
-                "history_compress_token_nums",
-                "new_token_nums",
-                "new_compress_token_nums",
-                "total_compress_token_nums",
-            ):
-                getattr(dst, field)[:real_bs].copy_(getattr(src, field))
-                if real_bs < bs:
-                    getattr(dst, field)[real_bs:].zero_()
+            dst.history_compress_token_nums[:real_bs].copy_(
+                src.history_compress_token_nums
+            )
+            if real_bs < bs:
+                dst.history_compress_token_nums[real_bs:].zero_()
             for field in (
                 "cu_seqlens",
                 "cu_new_token_nums",
-                "cu_new_compress_token_nums",
                 "cu_total_compress_token_nums",
             ):
                 dst_field = getattr(dst, field)
