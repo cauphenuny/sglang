@@ -196,7 +196,6 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
 
         metadata = sparse_utils._build_sparse_prefill_metadata(
             forward_batch=forward_batch,
-            base_metadata=None,
             sparse_bs_list=[],
             head_group_num=2,
             dense_len=8192,
@@ -208,6 +207,35 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         )
 
         self.assertEqual(metadata["sparse_page_table"].shape, (2, 7000))
+
+    def test_prefill_metadata_builds_layer_invariant_cache_lengths(self):
+        """Sparse cache lengths must not be inferred from zero-valued table entries."""
+        forward_batch = SimpleNamespace(
+            batch_size=2,
+            seq_lens_cpu=torch.tensor([200, 64], dtype=torch.int32),
+            extend_seq_lens_cpu=[2, 3],
+        )
+
+        metadata = sparse_utils._build_sparse_prefill_metadata(
+            forward_batch=forward_batch,
+            sparse_bs_list=[0],
+            head_group_num=2,
+            dense_len=100,
+            sparse_topk=2,
+            block_size=64,
+            cu_seqlens_q=torch.tensor([0, 2, 5], dtype=torch.int32),
+            sparse_page_table_dtype=torch.int32,
+            sparse_page_table_device=torch.device("cpu"),
+        )
+
+        self.assertEqual(
+            metadata["sparse_cache_seqlens_int32"].tolist(),
+            [71, 71, 72, 72, 64, 64],
+        )
+        self.assertEqual(
+            metadata["sparse_cu_seqlens_k"].tolist(),
+            [0, 71, 142, 214, 286, 350, 414],
+        )
 
     def test_dense_decode_page_table_covers_dense_threshold(self):
         """Dense decode must reserve page-table coverage through the dense threshold."""
@@ -443,6 +471,38 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         )
         self.assertTrue(all(call.kwargs["padded"] for call in compress.call_args_list))
 
+    def test_decode_compression_has_one_kernel_call_per_buffer_source(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        backend.forward_metadata = SimpleNamespace()
+        backend.max_context_len = 8
+        backend.k1_kernel_size = 2
+        backend.k1_kernel_stride = 2
+        backend.k2_kernel_size = 4
+        backend.k2_kernel_stride = 4
+        backend.minicpm_split_stage1 = True
+        backend.device = torch.device("cpu")
+        layer = SimpleNamespace(tp_k_head_num=1, head_dim=2)
+        forward_batch = SimpleNamespace(batch_size=2)
+
+        for use_graph_buffers in (False, True):
+            with self.subTest(use_graph_buffers=use_graph_buffers):
+                backend._use_cuda_graph_buffers = use_graph_buffers
+                backend.decode_cuda_graph_metadata = {
+                    "compress_k1": torch.empty(8, 1, 2),
+                    "compress_k2": torch.empty(4, 1, 2),
+                }
+                with patch.object(backend_module, "get_compress_k_v2") as compress:
+                    k1, k2 = backend._compress_decode_keys(
+                        torch.empty(1, dtype=torch.float16),
+                        layer,
+                        forward_batch,
+                    )
+
+                self.assertEqual(k1.shape, (8, 1, 2))
+                self.assertEqual(k2.shape, (4, 1, 2))
+                compress.assert_called_once()
+                self.assertTrue(compress.call_args.kwargs["padded"])
+
     def test_fused_topk_kernels_compile_lazily_per_batch_size(self):
         """Startup must not compile fused kernels for batch sizes that never run."""
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
@@ -638,6 +698,17 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             )
             self.assertEqual(level.cu_new_token_nums.numel(), 4)
             self.assertEqual(level.cu_total_compress_token_nums.numel(), 4)
+
+    def test_sparse_sequence_lengths_use_scheduler_values(self):
+        """Sparse query lengths must not be copied back from device offsets."""
+        query_lengths, key_lengths = sparse_utils._build_sequence_lengths(
+            extend_seq_lens_cpu=[3, 5],
+            seq_lens=torch.tensor([10, 20], dtype=torch.int32),
+            sparse_bs_list=[1],
+        )
+
+        self.assertEqual(query_lengths, [5])
+        self.assertEqual(key_lengths.tolist(), [20])
 
 
 if __name__ == "__main__":

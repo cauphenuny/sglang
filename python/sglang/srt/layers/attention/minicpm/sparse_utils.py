@@ -19,8 +19,6 @@ if TYPE_CHECKING:
     )
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
-import tilelang
-import tilelang.math
 import triton
 from sgl_kernel import infllmv2_attn_stage1, max_pooling_1d_varlen
 
@@ -369,6 +367,7 @@ def compressed_attention_tilelang(
     kernel_stride: int,
     block_size: int,
     topk: int,
+    kernel_topk: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
     cu_seqlens_k2: torch.Tensor,
@@ -410,14 +409,6 @@ def compressed_attention_tilelang(
 
         # Compute actual output topk (same as original: min(topk, num_blocks))
         output_topk = min(topk, pooled_k_len)
-
-        # For the kernel, we need power of 2 topk
-        topk_power2 = tilelang.math.next_power_of_2(output_topk)
-        kernel_topk = min(topk_power2, pooled_k_len)
-        # Make sure it's still power of 2
-        if kernel_topk != tilelang.math.next_power_of_2(kernel_topk):
-            kernel_topk = tilelang.math.next_power_of_2(kernel_topk) // 2
-        kernel_topk = max(8, kernel_topk)  # Minimum topk for kernel
 
         # Allocate output tensors
         topk_indices = torch.full(
@@ -517,40 +508,14 @@ class CompressionLevelMetadata(msgspec.Struct):
 
 
 def _build_sequence_lengths(
-    cu_seqlens_q: torch.Tensor,
-    extend_prefix_lens: torch.Tensor,
+    extend_seq_lens_cpu: list[int],
+    seq_lens: torch.Tensor,
     sparse_bs_list: list[int],
 ) -> tuple[list[int], torch.Tensor]:
-    """Build sequence lengths for sparse batches.
-
-    Computes seqlen_q_sparse_bs (query sequence lengths) and
-    seqlen_k_sparse_bs_tensor (key sequence lengths as tensor).
-
-    Args:
-        cu_seqlens_q: Cumulative sequence lengths for all batches
-        extend_prefix_lens: Extension prefix lengths tensor
-        sparse_bs_list: List of batch indices that are sparse
-
-    Returns:
-        Tuple of (seqlen_q_sparse_bs, seqlen_k_sparse_bs_tensor)
-        - seqlen_q_sparse_bs: Python list of query sequence lengths
-        - seqlen_k_sparse_bs_tensor: Tensor of key sequence lengths
-    """
-    # Extract query sequence lengths for sparse batches
-    # Using cu_seqlens_q.diff() to get sequence length for each batch
-    seqlen_q_sparse_bs = cu_seqlens_q.diff()[sparse_bs_list].tolist()
-
-    # Create tensor version with prefix lengths added (for key)
-    seqlen_k_sparse_bs_tensor = (
-        torch.tensor(
-            seqlen_q_sparse_bs,
-            dtype=torch.int32,
-            device=cu_seqlens_q.device,
-        )
-        + extend_prefix_lens[sparse_bs_list]
+    return (
+        [extend_seq_lens_cpu[index] for index in sparse_bs_list],
+        seq_lens[sparse_bs_list],
     )
-
-    return seqlen_q_sparse_bs, seqlen_k_sparse_bs_tensor
 
 
 def _build_token_mappings(
@@ -607,7 +572,7 @@ def _compute_single_compression_metadata(
     kernel_size: int,
     kernel_stride: int,
     cu_seqlens_q: torch.Tensor,
-) -> dict:
+) -> CompressionLevelMetadata:
     """Compute compression metadata for a single compression level (k1 or k2).
 
     Args:
@@ -619,18 +584,18 @@ def _compute_single_compression_metadata(
         cu_seqlens_q: Cumulative query sequence lengths
 
     Returns:
-        Dictionary with compression metadata fields for this level
+        Compression metadata for this level
     """
     bs = forward_batch.batch_size
-    seqlen_cpu = torch.zeros(
-        (bs,), dtype=base_metadata.cu_seqlens_q.dtype, device="cpu"
+    seq_lens_cpu = torch.as_tensor(
+        forward_batch.seq_lens_cpu,
+        dtype=base_metadata.cu_seqlens_q.dtype,
+        device="cpu",
     )
-
-    for i in range(bs):
-        seqlen_cpu[i] = max(
-            0,
-            (forward_batch.seq_lens_cpu[i] - kernel_size) // kernel_stride + 1,
-        )
+    seqlen_cpu = torch.clamp(
+        (seq_lens_cpu - kernel_size) // kernel_stride + 1,
+        min=0,
+    )
 
     cu_seqlens_cpu = F.pad(
         torch.cumsum(seqlen_cpu, dim=0, dtype=torch.int32), (1, 0)
@@ -675,14 +640,14 @@ def _compute_single_compression_metadata(
         torch.cumsum(total_compress_token_nums, dim=0, dtype=torch.int32), (1, 0)
     )
 
-    return {
-        "cu_seqlens": cu_seqlens,
-        "cu_seqlens_cpu": cu_seqlens_cpu,
-        "token_table": token_table,
-        "history_compress_token_nums": history_compress_token_nums,
-        "cu_new_token_nums": cu_new_token_nums,
-        "cu_total_compress_token_nums": cu_total_compress_token_nums,
-    }
+    return CompressionLevelMetadata(
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        table=token_table,
+        history_compress_token_nums=history_compress_token_nums,
+        cu_new_token_nums=cu_new_token_nums,
+        cu_total_compress_token_nums=cu_total_compress_token_nums,
+    )
 
 
 def _build_k1_k2_compression_metadata(
@@ -715,49 +680,41 @@ def _build_k1_k2_compression_metadata(
     Returns:
         Dictionary with 'k1' and 'k2' keys containing CompressionLevelMetadata
     """
-    # Compute k1 metadata
-    k1_dict = _compute_single_compression_metadata(
-        forward_batch,
-        base_metadata,
-        req_to_sparse_k1_token,
-        k1_kernel_size,
-        k1_kernel_stride,
-        cu_seqlens_q,
-    )
-
-    # Compute k2 metadata
-    k2_dict = _compute_single_compression_metadata(
-        forward_batch,
-        base_metadata,
-        req_to_sparse_k2_token,
-        k2_kernel_size,
-        k2_kernel_stride,
-        cu_seqlens_q,
-    )
-
     return {
-        "k1": CompressionLevelMetadata(
-            cu_seqlens=k1_dict["cu_seqlens"],
-            cu_seqlens_cpu=k1_dict["cu_seqlens_cpu"],
-            table=k1_dict["token_table"],
-            history_compress_token_nums=k1_dict["history_compress_token_nums"],
-            cu_new_token_nums=k1_dict["cu_new_token_nums"],
-            cu_total_compress_token_nums=k1_dict["cu_total_compress_token_nums"],
+        "k1": _compute_single_compression_metadata(
+            forward_batch=forward_batch,
+            base_metadata=base_metadata,
+            req_to_sparse_token=req_to_sparse_k1_token,
+            kernel_size=k1_kernel_size,
+            kernel_stride=k1_kernel_stride,
+            cu_seqlens_q=cu_seqlens_q,
         ),
-        "k2": CompressionLevelMetadata(
-            cu_seqlens=k2_dict["cu_seqlens"],
-            cu_seqlens_cpu=k2_dict["cu_seqlens_cpu"],
-            table=k2_dict["token_table"],
-            history_compress_token_nums=k2_dict["history_compress_token_nums"],
-            cu_new_token_nums=k2_dict["cu_new_token_nums"],
-            cu_total_compress_token_nums=k2_dict["cu_total_compress_token_nums"],
+        "k2": _compute_single_compression_metadata(
+            forward_batch=forward_batch,
+            base_metadata=base_metadata,
+            req_to_sparse_token=req_to_sparse_k2_token,
+            kernel_size=k2_kernel_size,
+            kernel_stride=k2_kernel_stride,
+            cu_seqlens_q=cu_seqlens_q,
         ),
     }
 
 
+def _get_sparse_cache_len(
+    seq_len: int,
+    sparse_capacity: int,
+    block_size: int,
+) -> int:
+    if seq_len <= sparse_capacity:
+        return seq_len
+    remainder = seq_len % block_size
+    return (
+        sparse_capacity if remainder == 0 else sparse_capacity - block_size + remainder
+    )
+
+
 def _build_sparse_prefill_metadata(
     forward_batch: ForwardBatch,
-    base_metadata: FlashAttentionMetadata,
     sparse_bs_list: list[int],
     head_group_num: int,
     dense_len: int,
@@ -774,7 +731,6 @@ def _build_sparse_prefill_metadata(
 
     Args:
         forward_batch: The forward batch to analyze
-        base_metadata: Base metadata with cu_seqlens_q
         sparse_bs_list: List of sparse batch indices
         head_group_num: Number of head groups
         dense_len: Dense length threshold for sparse activation
@@ -841,6 +797,35 @@ def _build_sparse_prefill_metadata(
     ), f"sparse_page_table_bs {sparse_page_table_bs} vs pt {pt}"
 
     sparse_cu_seqlens_q = sparse_cu_seqlens_q_cpu.to(device=cu_seqlens_q.device)
+    sparse_cache_seqlens = []
+    sparse_capacity = sparse_topk * block_size
+    for i in range(bs):
+        seq_len = int(forward_batch.seq_lens_cpu[i])
+        if seq_len >= dense_len:
+            prefix_len = seq_len - forward_batch.extend_seq_lens_cpu[i]
+            for token_offset in range(1, forward_batch.extend_seq_lens_cpu[i] + 1):
+                sparse_cache_seqlens.extend(
+                    [
+                        _get_sparse_cache_len(
+                            prefix_len + token_offset,
+                            sparse_capacity,
+                            block_size,
+                        )
+                    ]
+                    * head_group_num
+                )
+        else:
+            sparse_cache_seqlens.extend([seq_len] * head_group_num)
+
+    sparse_cache_seqlens_int32 = torch.tensor(
+        sparse_cache_seqlens,
+        dtype=torch.int32,
+        device=cu_seqlens_q.device,
+    )
+    sparse_cu_seqlens_k = F.pad(
+        torch.cumsum(sparse_cache_seqlens_int32, dim=0, dtype=torch.int32),
+        (1, 0),
+    )
 
     sparse_idx = []
     for sparse_bs in sparse_bs_list:
@@ -858,6 +843,8 @@ def _build_sparse_prefill_metadata(
         "old_bs_to_new_bs_range": old_bs_to_new_bs_range,
         "sparse_max_seq_len_q": sparse_max_seq_len_q,
         "sparse_idx": sparse_idx,
+        "sparse_cache_seqlens_int32": sparse_cache_seqlens_int32,
+        "sparse_cu_seqlens_k": sparse_cu_seqlens_k,
     }
 
 
@@ -896,14 +883,11 @@ def _build_sparse_decode_metadata(
     for b in range(bs):
         seq_len = int(forward_batch.seq_lens_cpu[b])
         if seq_len >= dense_len:
-            if seq_len <= sparse_topk * block_size:
-                sparse_cache_len = seq_len
-            elif seq_len % block_size == 0:
-                sparse_cache_len = sparse_topk * block_size
-            else:
-                sparse_cache_len = block_size * (sparse_topk - 1) + (
-                    seq_len % block_size
-                )
+            sparse_cache_len = _get_sparse_cache_len(
+                seq_len,
+                sparse_topk * block_size,
+                block_size,
+            )
 
             if sparse_cache_len > max_sparse_cache_len:
                 max_sparse_cache_len = sparse_cache_len
@@ -949,16 +933,12 @@ def _build_sparse_decode_metadata(
 
 def _build_prefill_topk_metadata(
     forward_batch: ForwardBatch,
-    base_metadata: FlashAttentionMetadata,
-    key_states: torch.Tensor,
     query_states: torch.Tensor,
     tp_q_head_num: int,
     head_dim: int,
-    compress_k1_kernel_size: int,
-    compress_k1_kernel_stride: int,
-    compress_k2_kernel_size: int,
-    compress_k2_kernel_stride: int,
     dense_len: int,
+    k1_metadata: CompressionLevelMetadata,
+    k2_metadata: CompressionLevelMetadata,
 ) -> dict:
     """Build prefill TopK metadata.
 
@@ -967,16 +947,12 @@ def _build_prefill_topk_metadata(
 
     Args:
         forward_batch: The forward batch
-        base_metadata: Base metadata with cu_seqlens
-        key_states: Key states from model layer
         query_states: Query states from model layer
         tp_q_head_num: Number of query heads
         head_dim: Head dimension
-        compress_k1_kernel_size: K1 compression kernel size
-        compress_k1_kernel_stride: K1 compression kernel stride
-        compress_k2_kernel_size: K2 compression kernel size
-        compress_k2_kernel_stride: K2 compression kernel stride
         dense_len: Dense length threshold
+        k1_metadata: K1 compression metadata
+        k2_metadata: K2 compression metadata
 
     Returns:
         Dictionary with prefill TopK metadata
@@ -987,25 +963,20 @@ def _build_prefill_topk_metadata(
         forward_batch.seq_lens_cpu,
     )
 
-    token_num_sparse_k1_total = [
-        (
-            (seq_len - compress_k1_kernel_size) // compress_k1_kernel_stride + 1
-            if seq_len >= compress_k1_kernel_size
-            else 0
+    k1_lens = [
+        end - start
+        for start, end in zip(
+            k1_metadata.cu_seqlens_cpu,
+            k1_metadata.cu_seqlens_cpu[1:],
         )
-        for seq_len in forward_batch.seq_lens_cpu
     ]
-    k1_lens = token_num_sparse_k1_total
-
-    token_num_sparse_k2_total = [
-        (
-            (seq_len - compress_k2_kernel_size) // compress_k2_kernel_stride + 1
-            if seq_len >= compress_k2_kernel_size
-            else 0
+    k2_lens = [
+        end - start
+        for start, end in zip(
+            k2_metadata.cu_seqlens_cpu,
+            k2_metadata.cu_seqlens_cpu[1:],
         )
-        for seq_len in forward_batch.seq_lens_cpu
     ]
-    k2_lens = token_num_sparse_k2_total
 
     sparse_bs = []
     seqlens_q_sparse_bs = []
@@ -1015,7 +986,7 @@ def _build_prefill_topk_metadata(
         if seqlens_k[i] >= dense_len:
             sparse_bs.append(i)
             seqlens_q_sparse_bs.append(seqlens_q[i])
-            seqlens_k_sparse_bs.append(seqlens_k[i].item())
+            seqlens_k_sparse_bs.append(int(seqlens_k[i]))
 
     cu_seqlens_q = torch.cumsum(
         torch.tensor([0] + seqlens_q, dtype=torch.int32, device=query_states.device),
@@ -1051,36 +1022,4 @@ def _build_prefill_topk_metadata(
         "max_seqlen_q": max(seqlens_q_sparse_bs),
         "max_seqlen_k": max(seqlens_k_sparse_bs),
         "query_states": query_states,
-    }
-
-
-def _build_decode_topk_metadata(
-    forward_batch: ForwardBatch,
-    base_metadata: FlashAttentionMetadata,
-    query_states: torch.Tensor,
-) -> dict:
-    """Build decode TopK metadata.
-
-    This method prepares metadata needed for TopK computation in decode mode.
-
-    Args:
-        forward_batch: The forward batch
-        base_metadata: Base metadata with cu_seqlens
-        query_states: Query states from model layer
-
-    Returns:
-        Dictionary with decode TopK metadata
-    """
-    query_states = query_states.squeeze(0)
-    cu_seqlens_k = base_metadata.cu_seqlens_k
-    max_seqlen_in_batch_k = base_metadata.max_seq_len_k
-    cu_seqlens_q = base_metadata.cu_seqlens_q
-    max_seqlen_in_batch_q = 1
-
-    return {
-        "query_states": query_states,
-        "cu_seqlens_q": cu_seqlens_q,
-        "cu_seqlens_k": cu_seqlens_k,
-        "max_seqlen_q": max_seqlen_in_batch_q,
-        "max_seqlen_k": max_seqlen_in_batch_k,
     }
