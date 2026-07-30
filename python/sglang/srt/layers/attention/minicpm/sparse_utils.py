@@ -537,7 +537,7 @@ def _build_sequence_lengths(
 ) -> tuple[list[int], torch.Tensor]:
     return (
         [extend_seq_lens_cpu[index] for index in sparse_bs_list],
-        seq_lens[sparse_bs_list],
+        seq_lens[sparse_bs_list].to(dtype=torch.int32),
     )
 
 

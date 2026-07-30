@@ -834,12 +834,13 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         """Sparse query lengths must not be copied back from device offsets."""
         query_lengths, key_lengths = sparse_utils._build_sequence_lengths(
             extend_seq_lens_cpu=[3, 5],
-            seq_lens=torch.tensor([10, 20], dtype=torch.int32),
+            seq_lens=torch.tensor([10, 20], dtype=torch.int64),
             sparse_bs_list=[1],
         )
 
         self.assertEqual(query_lengths, [5])
         self.assertEqual(key_lengths.tolist(), [20])
+        self.assertEqual(key_lengths.dtype, torch.int32)
 
 
 if __name__ == "__main__":
