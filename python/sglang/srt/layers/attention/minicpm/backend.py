@@ -569,7 +569,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 dtype=key_states.dtype,
                 device=key_states.device,
                 max_context_length=self.max_context_len,
-                minicpm_split_stage1=self.minicpm_split_stage1,
+                minicpm_split_stage1=False,
             )
 
             pt_k1, pt_k2 = 0, 0
@@ -835,7 +835,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 dtype=k.dtype,
                 device=k.device,
                 max_context_length=self.max_context_len,
-                minicpm_split_stage1=self.minicpm_split_stage1,
+                minicpm_split_stage1=False,
             )
 
         dense_layout_spans = []

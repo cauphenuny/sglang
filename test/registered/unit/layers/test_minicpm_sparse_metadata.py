@@ -186,6 +186,91 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         ):
             MiniCPMSparseBackend(model_runner)
 
+    def test_dense_as_sparse_routes_short_prefill(self):
+        req_pool = SimpleNamespace(
+            req_to_sparse_k1_token=torch.empty(0),
+            req_to_sparse_k2_token=torch.empty(0),
+        )
+        flash_attn_backend = SimpleNamespace(
+            max_context_len=256,
+            device="cpu",
+            decode_cuda_graph_metadata={},
+            req_to_token_pool=req_pool,
+            token_to_kv_pool=SimpleNamespace(),
+            page_size=1,
+        )
+        hf_config = SimpleNamespace(
+            has_minicpm_sparse_attention=True,
+            sparse_kernel_size=32,
+            sparse_kernel_stride=16,
+            sparse_init_blocks=1,
+            sparse_block_size=64,
+            sparse_window_size=64,
+            sparse_dense_len=128,
+            sparse_topk=1,
+        )
+        model_runner = SimpleNamespace(
+            dtype=torch.float16,
+            token_to_kv_pool_allocator=SimpleNamespace(),
+            server_args=SimpleNamespace(
+                attention_backend="minicpm_flashattn",
+                disable_cuda_graph=False,
+                enable_memory_saver=False,
+                chunked_prefill_size=64,
+            ),
+            model_config=SimpleNamespace(
+                hf_config=hf_config,
+                num_attention_heads=16,
+                head_dim=128,
+                get_num_kv_heads=lambda _tp: 1,
+            ),
+        )
+
+        with (
+            backend_module.envs.SGLANG_MINICPM_DENSE_AS_SPARSE.override(True),
+            patch.object(backend_module, "MiniCPMHybridConfig", SimpleNamespace),
+            patch.object(backend_module, "is_blackwell_supported", return_value=False),
+            patch.object(
+                backend_module,
+                "FlashAttentionBackend",
+                return_value=flash_attn_backend,
+            ),
+            patch.object(
+                backend_module,
+                "get_parallel",
+                return_value=SimpleNamespace(attn_tp_size=1),
+            ),
+            patch.object(backend_module, "attach_compressed_cache"),
+        ):
+            backend = MiniCPMSparseBackend(model_runner)
+
+        forward_batch = SimpleNamespace(
+            batch_size=1,
+            seq_lens_cpu=torch.tensor([1], dtype=torch.int32),
+            seq_lens=torch.tensor([1], dtype=torch.int32),
+            extend_seq_lens_cpu=[1],
+            extend_prefix_lens_cpu=[0],
+            forward_mode=SimpleNamespace(
+                is_extend_or_draft_extend_or_mixed=lambda: True
+            ),
+        )
+        metadata = SimpleNamespace(
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            cache_seqlens_int32=torch.tensor([1], dtype=torch.int32),
+            page_table=torch.zeros((1, 1), dtype=torch.int32),
+            max_seq_len_q=1,
+        )
+        level = CompressionLevelMetadata()
+        with patch.object(
+            backend_module,
+            "_build_k1_k2_compression_metadata",
+            return_value={"k1": level, "k2": level},
+        ):
+            backend.update_batch_for_sparse(forward_batch, metadata)
+
+        self.assertEqual(backend.dense_len, 0)
+        self.assertEqual(metadata.sparse_bs_list, [0])
+
     def test_dense_prefill_page_table_covers_total_sequence(self):
         """Dense prefill must retain page-table coverage for the full sequence."""
         forward_batch = SimpleNamespace(
@@ -615,7 +700,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend.k2_kernel_stride = 1
         backend.dense_len = 1
         backend.max_context_len = 1
-        backend.minicpm_split_stage1 = False
+        backend.minicpm_split_stage1 = True
         layer = SimpleNamespace(tp_q_head_num=1, tp_k_head_num=1, head_dim=1)
         forward_batch = SimpleNamespace(batch_size=2)
 
@@ -624,7 +709,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                 backend_module,
                 "allocate_and_compress_keys",
                 return_value=(torch.ones(1, 1, 1), torch.ones(1, 1, 1)),
-            ),
+            ) as allocate,
             patch.object(
                 backend_module,
                 "_build_prefill_topk_metadata",
@@ -659,6 +744,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
 
         self.assertEqual(result, "sparse-kernel")
         get_kernel.assert_called_once_with(1, is_prefill=True)
+        self.assertFalse(allocate.call_args.kwargs["minicpm_split_stage1"])
 
     def test_compression_metadata_ignores_cuda_graph_padding(self):
         """CUDA graph padding rows must not alter offsets for real requests."""
