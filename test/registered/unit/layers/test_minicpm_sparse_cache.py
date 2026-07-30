@@ -88,10 +88,10 @@ def make_pool_and_req(capacity: int = 64):
 
 
 def alloc_extend(pool, tree_cache, req_pool_idx: int, seq_len: int):
-    pool.alloc_aux_for_extend(
+    pool.alloc_aux_to_lengths(
         tree_cache=tree_cache,
         req_pool_indices_cpu=torch.tensor([req_pool_idx], dtype=torch.int64),
-        seq_lens_cpu=torch.tensor([seq_len], dtype=torch.int64),
+        target_seq_lens_cpu=torch.tensor([seq_len], dtype=torch.int64),
     )
 
 
@@ -132,19 +132,17 @@ def test_decode_does_not_duplicate_sparse_slots():
     cache = pool._aux_cache
     alloc_extend(pool, tree_cache, req_pool_idx, seq_len=15)
 
-    pool.alloc_aux_for_decode(
+    pool.alloc_aux_to_lengths(
         tree_cache=tree_cache,
         req_pool_indices_cpu=torch.tensor([req_pool_idx], dtype=torch.int64),
-        seq_lens_cpu=torch.tensor([15], dtype=torch.int64),
-        token_per_req=1,
+        target_seq_lens_cpu=torch.tensor([16], dtype=torch.int64),
     )
     available_after_first_decode = len(cache.free_slots)
 
-    pool.alloc_aux_for_decode(
+    pool.alloc_aux_to_lengths(
         tree_cache=tree_cache,
         req_pool_indices_cpu=torch.tensor([req_pool_idx], dtype=torch.int64),
-        seq_lens_cpu=torch.tensor([15], dtype=torch.int64),
-        token_per_req=1,
+        target_seq_lens_cpu=torch.tensor([16], dtype=torch.int64),
     )
     assert available_after_first_decode == 17
     assert len(cache.free_slots) == available_after_first_decode
