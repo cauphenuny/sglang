@@ -13,10 +13,11 @@ import msgspec
 import torch
 import torch.nn.functional as F
 
+from sglang.srt.layers.attention.flashattention_backend import (
+    FlashAttentionMetadata,
+)
+
 if TYPE_CHECKING:
-    from sglang.srt.layers.attention.flashattention_backend import (
-        FlashAttentionMetadata,
-    )
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
 import triton
@@ -125,7 +126,7 @@ def compress_k_core_new(
 def get_compress_k_v2(
     layer,
     forward_batch,
-    metadata: FlashAttentionMetadata,
+    metadata: MiniCPMSparseMetadata,
     full_compressed_k1,
     full_compressed_k2,
     max_context_length,
@@ -157,7 +158,7 @@ def get_compress_k_v2(
             full_compressed_k,
             batch,
             key_cache,
-            metadata.page_table,
+            metadata.base.page_table,
             level.table,
             level.cu_new_token_nums,
             level.history_compress_token_nums,
@@ -172,7 +173,7 @@ def get_compress_k_v2(
 def allocate_and_compress_keys(
     layer,
     forward_batch,
-    metadata: FlashAttentionMetadata,
+    metadata: MiniCPMSparseMetadata,
     k1_token_nums: int,
     k2_token_nums: int,
     k1_kernel_size: int,
@@ -189,7 +190,7 @@ def allocate_and_compress_keys(
     Args:
         layer: Model layer with head configuration
         forward_batch: Forward batch info
-        metadata: FlashAttention metadata
+        metadata: MiniCPM sparse metadata
         k1_token_nums: Number of k1 tokens to allocate
         k2_token_nums: Number of k2 tokens to allocate
         k1_kernel_size: K1 compression window
@@ -505,6 +506,28 @@ class CompressionLevelMetadata(msgspec.Struct):
     history_compress_token_nums: Optional[torch.Tensor] = None
     cu_new_token_nums: Optional[torch.Tensor] = None
     cu_total_compress_token_nums: Optional[torch.Tensor] = None
+
+
+class MiniCPMSparseMetadata(msgspec.Struct):
+    base: FlashAttentionMetadata
+    k1: Optional[CompressionLevelMetadata] = None
+    k2: Optional[CompressionLevelMetadata] = None
+    sparse_bs_list: Optional[list[int]] = None
+    sparse_batch_size: int = 0
+    sparse_idx: Optional[list[int]] = None
+    seqlen_k_sparse_bs_tensor: Optional[torch.Tensor] = None
+    token_to_bs: Optional[torch.Tensor] = None
+    token_pos_in_bs: Optional[torch.Tensor] = None
+    sparse_page_table: Optional[torch.Tensor] = None
+    sparse_cache_seqlens_int32: Optional[torch.Tensor] = None
+    sparse_cu_seqlens_q_cpu: Optional[torch.Tensor] = None
+    sparse_cu_seqlens_q: Optional[torch.Tensor] = None
+    sparse_cu_seqlens_k: Optional[torch.Tensor] = None
+    sparse_max_seq_len_q: int = 1
+    old_bs_to_new_bs_range: Optional[list[int]] = None
+    cache_seqlens_int32_stage1: Optional[torch.Tensor] = None
+    cu_seqlens_q_adjusted: Optional[torch.Tensor] = None
+    max_seqlen_q_adjusted: int = 1
 
 
 def _build_sequence_lengths(

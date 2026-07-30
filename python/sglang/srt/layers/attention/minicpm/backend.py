@@ -11,7 +11,6 @@ from sglang.srt.environ import envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.flashattention_backend import (
     FlashAttentionBackend,
-    FlashAttentionMetadata,
 )
 from sglang.srt.layers.attention.minicpm.attention_adapter import (
     MiniCPMFlashAttentionAdapter,
@@ -40,6 +39,7 @@ from sglang.srt.layers.attention.minicpm.fuse_kernel import (
 )
 from sglang.srt.layers.attention.minicpm.sparse_utils import (
     CompressionLevelMetadata,
+    MiniCPMSparseMetadata,
     _build_k1_k2_compression_metadata,
     _build_prefill_topk_metadata,
     _build_sequence_lengths,
@@ -95,7 +95,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             skip_prefill=skip_prefill,
             fa_impl_ver=fa_impl_ver,
         )
-        self.forward_metadata: Optional[FlashAttentionMetadata] = None
+        self.forward_metadata: Optional[MiniCPMSparseMetadata] = None
         self.max_context_len = self.flash_attn_backend.max_context_len
         self.device = self.flash_attn_backend.device
         self.model_dtype = model_runner.dtype
@@ -264,13 +264,13 @@ class MiniCPMSparseBackend(AttentionBackend):
         return cache[batch_size]
 
     def update_batch_for_sparse(
-        self, forward_batch: ForwardBatch, metadata: FlashAttentionMetadata
+        self, forward_batch: ForwardBatch, metadata: MiniCPMSparseMetadata
     ):
-        cu_seqlens_q = metadata.cu_seqlens_q
+        cu_seqlens_q = metadata.base.cu_seqlens_q
 
         compression_metadata = _build_k1_k2_compression_metadata(
             forward_batch=forward_batch,
-            base_metadata=metadata,
+            base_metadata=metadata.base,
             req_to_sparse_k1_token=self.req_to_sparse_k1_token,
             req_to_sparse_k2_token=self.req_to_sparse_k2_token,
             k1_kernel_size=self.k1_kernel_size,
@@ -318,10 +318,10 @@ class MiniCPMSparseBackend(AttentionBackend):
                 seqlen_q_sparse_bs,
             )
             metadata.token_to_bs = metadata.token_to_bs.to(
-                device=metadata.cu_seqlens_q.device
+                device=metadata.base.cu_seqlens_q.device
             )
             metadata.token_pos_in_bs = metadata.token_pos_in_bs.to(
-                device=metadata.cu_seqlens_q.device
+                device=metadata.base.cu_seqlens_q.device
             )
 
             prefill_metadata = _build_sparse_prefill_metadata(
@@ -332,8 +332,8 @@ class MiniCPMSparseBackend(AttentionBackend):
                 sparse_topk=self.sparse_topk,
                 block_size=self.block_size,
                 cu_seqlens_q=cu_seqlens_q,
-                sparse_page_table_dtype=metadata.page_table.dtype,
-                sparse_page_table_device=metadata.page_table.device,
+                sparse_page_table_dtype=metadata.base.page_table.dtype,
+                sparse_page_table_device=metadata.base.page_table.device,
             )
 
             metadata.sparse_page_table = prefill_metadata["sparse_page_table"]
@@ -352,12 +352,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             metadata.sparse_idx = prefill_metadata["sparse_idx"]
 
             # Stage1 optimization metadata for prefill mode
-            metadata.cache_seqlens_int32_stage1 = metadata.cache_seqlens_int32 - 1
+            metadata.cache_seqlens_int32_stage1 = metadata.base.cache_seqlens_int32 - 1
             if seqlen_q_sparse_bs:
                 seqlen_q_sparse_tensor = torch.tensor(
                     seqlen_q_sparse_bs,
                     dtype=torch.int32,
-                    device=metadata.cu_seqlens_q.device,
+                    device=metadata.base.cu_seqlens_q.device,
                 )
                 cu_seqlen_q_sparse_tensor = F.pad(
                     torch.cumsum(seqlen_q_sparse_tensor, dim=0, dtype=torch.int32),
@@ -371,15 +371,15 @@ class MiniCPMSparseBackend(AttentionBackend):
                 )
             else:
                 metadata.cu_seqlens_q_adjusted = (
-                    metadata.cu_seqlens_q * self.heads_per_group
+                    metadata.base.cu_seqlens_q * self.heads_per_group
                 )
                 metadata.max_seqlen_q_adjusted = (
-                    metadata.max_seq_len_q * self.heads_per_group
+                    metadata.base.max_seq_len_q * self.heads_per_group
                 )
         else:
             decode_metadata = _build_sparse_decode_metadata(
                 forward_batch=forward_batch,
-                base_metadata=metadata,
+                base_metadata=metadata.base,
                 head_group_num=self.head_group_num,
                 dense_len=self.dense_len,
                 sparse_topk=self.sparse_topk,
@@ -395,12 +395,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             metadata.token_to_bs = decode_metadata["token_to_bs"]
 
             # Stage1 optimization metadata for decode mode
-            metadata.cache_seqlens_int32_stage1 = metadata.cache_seqlens_int32 - 1
+            metadata.cache_seqlens_int32_stage1 = metadata.base.cache_seqlens_int32 - 1
             metadata.cu_seqlens_q_adjusted = (
-                metadata.cu_seqlens_q * self.heads_per_group
+                metadata.base.cu_seqlens_q * self.heads_per_group
             )
             metadata.max_seqlen_q_adjusted = (
-                metadata.max_seq_len_q * self.heads_per_group
+                metadata.base.max_seq_len_q * self.heads_per_group
             )
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
@@ -415,7 +415,7 @@ class MiniCPMSparseBackend(AttentionBackend):
 
         self._use_cuda_graph_buffers = False
         self.flash_attn_backend.init_forward_metadata(forward_batch)
-        metadata = self.flash_attn_backend.forward_metadata
+        metadata = MiniCPMSparseMetadata(base=self.flash_attn_backend.forward_metadata)
         if forward_batch.forward_mode.is_idle():
             self.forward_metadata = metadata
             return
@@ -520,10 +520,10 @@ class MiniCPMSparseBackend(AttentionBackend):
                     max_context_length=self.max_context_len,
                 )
 
-                cu_seqlens_k = metadata.cu_seqlens_k
-                max_seqlen_in_batch_k = metadata.max_seq_len_k
-                cu_seqlens_q = metadata.cu_seqlens_q
-                max_seqlen_in_batch_q = metadata.max_seq_len_q
+                cu_seqlens_k = metadata.base.cu_seqlens_k
+                max_seqlen_in_batch_k = metadata.base.max_seq_len_k
+                cu_seqlens_q = metadata.base.cu_seqlens_q
+                max_seqlen_in_batch_q = metadata.base.max_seq_len_q
 
                 ret = self.sparse_get_topk_impl(
                     query_states,
@@ -655,10 +655,10 @@ class MiniCPMSparseBackend(AttentionBackend):
 
             ret = self.sparse_get_topk_impl(
                 query_states,
-                metadata.cu_seqlens_q,
-                metadata.cu_seqlens_k,
+                metadata.base.cu_seqlens_q,
+                metadata.base.cu_seqlens_k,
                 1,
-                metadata.max_seq_len_k,
+                metadata.base.max_seq_len_k,
                 compressed_k=compressed_k,
                 compressed_cu_seqlens=metadata.k1.cu_seqlens,
                 compressed_k2=compressed_k2,
@@ -792,7 +792,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 is_prefill=True,
             )
         )
-        page_table = metadata.page_table
+        page_table = metadata.base.page_table
 
         bs = forward_batch.batch_size
         if metadata.sparse_batch_size > 0:
@@ -962,8 +962,8 @@ class MiniCPMSparseBackend(AttentionBackend):
             head_group_num=self.head_group_num,
         )
 
-        page_table = metadata.page_table
-        cache_seqlens = metadata.cache_seqlens_int32
+        page_table = metadata.base.page_table
+        cache_seqlens = metadata.base.cache_seqlens_int32
         q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
 
         topk_idx = self.get_topk_for_sparse(
@@ -1112,10 +1112,13 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.flash_attn_backend.init_forward_metadata_out_graph(
             forward_batch, in_capture
         )
-        metadata = self.flash_attn_backend.forward_metadata
-        if in_capture:
-            self._bind_sparse_graph_metadata(forward_batch, metadata)
-        else:
+        metadata = MiniCPMSparseMetadata(base=self.flash_attn_backend.forward_metadata)
+        self._bind_sparse_graph_metadata(
+            forward_batch,
+            metadata,
+            in_capture=in_capture,
+        )
+        if not in_capture:
             self._replay_sparse_graph_metadata(forward_batch, metadata)
         self.attention_adapter.prepare_forward(
             metadata,
@@ -1128,11 +1131,11 @@ class MiniCPMSparseBackend(AttentionBackend):
     def _build_sparse_decode_replay_metadata(
         self,
         forward_batch: ForwardBatch,
-        metadata: FlashAttentionMetadata,
+        metadata: MiniCPMSparseMetadata,
     ):
         decode_metadata = _build_sparse_decode_metadata(
             forward_batch=forward_batch,
-            base_metadata=metadata,
+            base_metadata=metadata.base,
             head_group_num=self.head_group_num,
             dense_len=self.dense_len,
             sparse_topk=self.sparse_topk,
@@ -1140,21 +1143,23 @@ class MiniCPMSparseBackend(AttentionBackend):
         )
         compression_metadata = _build_k1_k2_compression_metadata(
             forward_batch=forward_batch,
-            base_metadata=metadata,
+            base_metadata=metadata.base,
             req_to_sparse_k1_token=self.req_to_sparse_k1_token,
             req_to_sparse_k2_token=self.req_to_sparse_k2_token,
             k1_kernel_size=self.k1_kernel_size,
             k1_kernel_stride=self.k1_kernel_stride,
             k2_kernel_size=self.k2_kernel_size,
             k2_kernel_stride=self.k2_kernel_stride,
-            cu_seqlens_q=metadata.cu_seqlens_q,
+            cu_seqlens_q=metadata.base.cu_seqlens_q,
         )
         return decode_metadata, compression_metadata
 
     def _bind_sparse_graph_metadata(
         self,
         forward_batch: ForwardBatch,
-        metadata: FlashAttentionMetadata,
+        metadata: MiniCPMSparseMetadata,
+        *,
+        in_capture: bool,
     ):
         bs = forward_batch.batch_size
         buffers = self.decode_cuda_graph_metadata
@@ -1168,10 +1173,12 @@ class MiniCPMSparseBackend(AttentionBackend):
         metadata.sparse_page_table = buffers["sparse_page_table"][:sparse_rows]
 
         assume_kv_len = self.config_dense_len
-        metadata.cu_seqlens_k.copy_(
-            torch.arange(bs + 1, device=self.device, dtype=torch.int32) * assume_kv_len
-        )
-        metadata.max_seq_len_k = assume_kv_len
+        if in_capture:
+            metadata.base.cu_seqlens_k.copy_(
+                torch.arange(bs + 1, device=self.device, dtype=torch.int32)
+                * assume_kv_len
+            )
+            metadata.base.max_seq_len_k = assume_kv_len
 
         for name, kernel_size, kernel_stride in (
             ("k1", self.k1_kernel_size, self.k1_kernel_stride),
@@ -1181,9 +1188,11 @@ class MiniCPMSparseBackend(AttentionBackend):
             setattr(metadata, name, level)
             level_len = max(0, (assume_kv_len - kernel_size) // kernel_stride + 1)
             level.cu_seqlens = buffers[f"{name}.cu_seqlens"][: bs + 1]
-            level.cu_seqlens.copy_(
-                torch.arange(bs + 1, device=self.device, dtype=torch.int32) * level_len
-            )
+            if in_capture:
+                level.cu_seqlens.copy_(
+                    torch.arange(bs + 1, device=self.device, dtype=torch.int32)
+                    * level_len
+                )
             level.table = buffers[f"{name}.table"][:bs]
             level.history_compress_token_nums = buffers[
                 f"{name}.history_compress_token_nums"
@@ -1196,12 +1205,14 @@ class MiniCPMSparseBackend(AttentionBackend):
 
         metadata.cu_seqlens_q_adjusted = buffers["cu_seqlens_q_adjusted"][: bs + 1]
         metadata.cache_seqlens_int32_stage1 = buffers["cache_seqlens_int32_stage1"][:bs]
-        metadata.max_seqlen_q_adjusted = metadata.max_seq_len_q * self.heads_per_group
+        metadata.max_seqlen_q_adjusted = (
+            metadata.base.max_seq_len_q * self.heads_per_group
+        )
 
     def _replay_sparse_graph_metadata(
         self,
         forward_batch: ForwardBatch,
-        metadata: FlashAttentionMetadata,
+        metadata: MiniCPMSparseMetadata,
     ):
         bs = forward_batch.batch_size
         real_bs = bs - forward_batch.num_padding
@@ -1227,7 +1238,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             decode_metadata["sparse_cu_seqlens_k"]
         )
         metadata.cache_seqlens_int32_stage1[:real_bs].copy_(
-            metadata.cache_seqlens_int32[:real_bs] - 1
+            metadata.base.cache_seqlens_int32[:real_bs] - 1
         )
 
         for name, kernel_stride, req_to_sparse in (

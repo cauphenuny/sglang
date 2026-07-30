@@ -6,9 +6,9 @@ import torch
 
 from sglang.kernels.ops.attention.flash_attention import flash_attn_with_kvcache
 from sglang.kernels.ops.attention.utils import create_flashinfer_kv_indices_triton
-from sglang.srt.layers.attention.flashattention_backend import (
-    FlashAttentionBackend,
-    FlashAttentionMetadata,
+from sglang.srt.layers.attention.flashattention_backend import FlashAttentionBackend
+from sglang.srt.layers.attention.minicpm.sparse_utils import (
+    MiniCPMSparseMetadata,
 )
 from sglang.srt.utils import is_flashinfer_available
 
@@ -23,7 +23,7 @@ class MiniCPMFlashAttentionAdapter:
 
     def prepare_forward(
         self,
-        metadata: FlashAttentionMetadata,
+        metadata: MiniCPMSparseMetadata,
         *,
         is_prefill: bool,
         graph: bool,
@@ -39,7 +39,7 @@ class MiniCPMFlashAttentionAdapter:
         q: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        metadata: FlashAttentionMetadata,
+        metadata: MiniCPMSparseMetadata,
         layer: RadixAttention,
         *,
         batch_size: int,
@@ -64,7 +64,9 @@ class MiniCPMFlashAttentionAdapter:
             cu_seqlens_q=metadata.sparse_cu_seqlens_q,
             cu_seqlens_k_new=metadata.sparse_cu_seqlens_k,
             max_seqlen_q=(
-                metadata.sparse_max_seq_len_q if is_prefill else metadata.max_seq_len_q
+                metadata.sparse_max_seq_len_q
+                if is_prefill
+                else metadata.base.max_seq_len_q
             ),
             softmax_scale=layer.scaling,
             causal=True,
@@ -139,7 +141,7 @@ class MiniCPMFlashInferAdapter:
 
     def prepare_forward(
         self,
-        metadata: FlashAttentionMetadata,
+        metadata: MiniCPMSparseMetadata,
         *,
         is_prefill: bool,
         graph: bool,
@@ -163,7 +165,7 @@ class MiniCPMFlashInferAdapter:
 
     def _prepare(
         self,
-        metadata: FlashAttentionMetadata,
+        metadata: MiniCPMSparseMetadata,
         *,
         is_prefill: bool,
         graph: bool = False,
@@ -242,7 +244,7 @@ class MiniCPMFlashInferAdapter:
         q: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
-        metadata: FlashAttentionMetadata,
+        metadata: MiniCPMSparseMetadata,
         layer: RadixAttention,
         *,
         batch_size: int,

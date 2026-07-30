@@ -35,6 +35,16 @@ class _DeviceOffsetsMustNotBeRead:
 
 
 class TestMiniCPMSparseMetadata(CustomTestCase):
+    def test_sparse_metadata_does_not_patch_base_metadata(self):
+        base_metadata = SimpleNamespace()
+        metadata_type = getattr(sparse_utils, "MiniCPMSparseMetadata")
+
+        metadata = metadata_type(base=base_metadata)
+        metadata.sparse_batch_size = 1
+
+        self.assertEqual(metadata.sparse_batch_size, 1)
+        self.assertFalse(hasattr(base_metadata, "sparse_batch_size"))
+
     def test_head_group_layout_round_trip(self):
         tensor = torch.arange(10).reshape(5, 2, 1)
         original = tensor.clone()
@@ -254,11 +264,13 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                 is_extend_or_draft_extend_or_mixed=lambda: True
             ),
         )
-        metadata = SimpleNamespace(
-            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
-            cache_seqlens_int32=torch.tensor([1], dtype=torch.int32),
-            page_table=torch.zeros((1, 1), dtype=torch.int32),
-            max_seq_len_q=1,
+        metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(
+                cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+                cache_seqlens_int32=torch.tensor([1], dtype=torch.int32),
+                page_table=torch.zeros((1, 1), dtype=torch.int32),
+                max_seq_len_q=1,
+            )
         )
         level = CompressionLevelMetadata()
         with patch.object(
@@ -361,15 +373,17 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend.attention_adapter = SimpleNamespace(
             forward=Mock(return_value=torch.ones(1, 1, 1))
         )
-        backend.forward_metadata = SimpleNamespace(
-            page_table=torch.tensor([[0, 1, 0, 0]], dtype=torch.int32),
-            cache_seqlens_int32=torch.tensor([2], dtype=torch.int32),
+        backend.forward_metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(
+                page_table=torch.tensor([[0, 1, 0, 0]], dtype=torch.int32),
+                cache_seqlens_int32=torch.tensor([2], dtype=torch.int32),
+                max_seq_len_q=1,
+            ),
             sparse_page_table=torch.zeros((1, 4), dtype=torch.int32),
             sparse_cache_seqlens_int32=torch.tensor([2], dtype=torch.int32),
             sparse_cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
             sparse_cu_seqlens_k=torch.tensor([0, 2], dtype=torch.int32),
             token_to_bs=torch.tensor([0], dtype=torch.int32),
-            max_seq_len_q=1,
         )
         backend.head_group_num = 1
         backend.heads_per_group = 1
@@ -515,6 +529,30 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                     backend.decode_cuda_graph_metadata,
                 )
 
+        base_metadata = SimpleNamespace(
+            cu_seqlens_k=torch.zeros(2, dtype=torch.int32),
+            max_seq_len_k=0,
+            max_seq_len_q=1,
+        )
+        capture_metadata = sparse_utils.MiniCPMSparseMetadata(base=base_metadata)
+        forward_batch = SimpleNamespace(batch_size=1)
+        backend._bind_sparse_graph_metadata(
+            forward_batch,
+            capture_metadata,
+            in_capture=True,
+        )
+        self.assertIsNotNone(capture_metadata.k1)
+        self.assertFalse(hasattr(base_metadata, "k1"))
+
+        base_metadata.cu_seqlens_k.copy_(torch.tensor([0, 7], dtype=torch.int32))
+        replay_metadata = sparse_utils.MiniCPMSparseMetadata(base=base_metadata)
+        backend._bind_sparse_graph_metadata(
+            forward_batch,
+            replay_metadata,
+            in_capture=False,
+        )
+        self.assertEqual(base_metadata.cu_seqlens_k.tolist(), [0, 7])
+
     def test_compression_uses_configured_k1_k2_layout(self):
         """K1/K2 compression must honor checkpoint strides instead of fixed defaults."""
         layer = SimpleNamespace(layer_id=0, tp_k_head_num=1, head_dim=1)
@@ -525,8 +563,8 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             cu_new_token_nums=torch.empty(0),
             cu_total_compress_token_nums=torch.empty(0),
         )
-        metadata = SimpleNamespace(
-            page_table=torch.empty(0),
+        metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(page_table=torch.empty(0)),
             k1=level,
             k2=level,
         )
@@ -640,6 +678,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         )
         backend.update_batch_for_sparse = lambda *_: None
         backend._get_fused_topk_kernel = lambda *_args, **_kwargs: None
+        backend._bind_sparse_graph_metadata = lambda *_args, **_kwargs: None
         backend._replay_sparse_graph_metadata = lambda *_: None
         backend.attention_adapter = SimpleNamespace(
             prepare_forward=lambda *_args, **_kwargs: None,
@@ -655,9 +694,11 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend._use_cuda_graph_buffers = True
         backend.init_forward_metadata(forward_batch)
         self.assertFalse(backend._use_cuda_graph_buffers)
+        self.assertIs(backend.forward_metadata.base, metadata)
 
         backend.init_forward_metadata_out_graph(forward_batch)
         self.assertTrue(backend._use_cuda_graph_buffers)
+        self.assertIs(backend.forward_metadata.base, metadata)
 
     def test_idle_batch_skips_sparse_metadata(self):
         """An idle DP rank must not attempt sparse metadata construction."""
@@ -678,7 +719,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
 
         backend.init_forward_metadata(SimpleNamespace(forward_mode=forward_mode))
 
-        self.assertIs(backend.forward_metadata, metadata)
+        self.assertIs(backend.forward_metadata.base, metadata)
 
     def test_mixed_prefill_compiles_fused_topk_for_sparse_batch_only(self):
         """A mixed batch must compile fused top-k for its sparse sub-batch only."""
