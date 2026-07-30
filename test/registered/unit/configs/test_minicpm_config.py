@@ -142,6 +142,22 @@ def test_minicpm_lightning_attention_bias_applies_to_every_projection():
     assert mixer.z_proj.bias is not None
 
 
+def test_minicpm_lightning_rejects_unknown_scale():
+    with (
+        get_parallel().override(tp_size=1, tp_rank=0),
+        pytest.raises(ValueError, match="Unsupported lightning scale"),
+    ):
+        MiniCPMLightningMixer(
+            hidden_size=8,
+            num_heads=2,
+            num_kv_heads=2,
+            head_dim=4,
+            use_rope=False,
+            qk_norm=False,
+            scale="unknown",
+        )
+
+
 def test_minicpm_full_attention_bias_applies_to_every_projection():
     """Enabling attention bias must cover every full-attention projection."""
     with get_parallel().override(tp_size=1, tp_rank=0):

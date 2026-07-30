@@ -243,7 +243,7 @@ class MiniCPMLightningMixer(nn.Module):
         elif isinstance(scale, (int, float)):
             scaling = float(scale)
         else:
-            scaling = 1.0
+            raise ValueError(f"Unsupported lightning scale: {scale}")
         self.use_output_gate = use_output_gate
         self.attention_bias = attention_bias
         self.rms_norm_eps = rms_norm_eps
@@ -364,11 +364,7 @@ class MiniCPMDecoderLayer(nn.Module):
         self.layer_id = layer_id
         self.hidden_size = config.hidden_size
         if isinstance(config, MiniCPMHybridConfig):
-            self.mixer_type = (
-                config.mixer_types[layer_id]
-                if config.mixer_types is not None
-                else "minicpm4"
-            )
+            self.mixer_type = config.mixer_types[layer_id]
             attn_use_rope = config.attn_use_rope
             attn_use_output_gate = config.attn_use_output_gate
             attention_bias = config.attention_bias
@@ -395,10 +391,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 attention_bias=attention_bias,
                 prefix=add_prefix("self_attn", prefix),
             )
-        elif self.mixer_type in ["lightning", "lightning_attn", "lightning-attn"]:
-            assert (
-                config.head_dim is not False
-            ), "head_dim must be provided for LightningAttention"
+        elif self.mixer_type == "lightning-attn":
             self.self_attn = MiniCPMLightningMixer(
                 hidden_size=self.hidden_size,
                 num_heads=config.lightning_nh,

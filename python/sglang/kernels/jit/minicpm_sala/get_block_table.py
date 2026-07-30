@@ -1,36 +1,17 @@
 from __future__ import annotations
 
-import importlib.util
-import pathlib
 from typing import TYPE_CHECKING
 
 import torch
 
 from sglang.kernels.jit.utils import (
     cache_once,
-    is_hip_runtime,
     load_jit,
     make_cpp_args,
 )
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
-
-
-@cache_once
-def _get_cccl_include_paths() -> list[str]:
-    if is_hip_runtime():
-        return []
-    spec = importlib.util.find_spec("flashinfer")
-    if spec is None or spec.origin is None:
-        return []
-    cccl_root = pathlib.Path(spec.origin).resolve().parent / "data" / "cccl"
-    candidates = (
-        cccl_root / "libcudacxx" / "include",
-        cccl_root / "cub",
-        cccl_root / "thrust",
-    )
-    return [str(path) for path in candidates if path.exists()]
 
 
 @cache_once
@@ -45,18 +26,17 @@ def _jit_get_block_table_module(
     """
     args = make_cpp_args(topk, head_group_num, block_size)
     wrappers = [
-        ("get_block_table_v2", f"minicpm_sala::get_block_table_v2<{args}>"),
+        ("get_block_table_v2", f"minicpm_sala::get_block_table<2, {args}>"),
     ]
     if block_size == 64 and topk % 16 == 0:
         wrappers.append(
-            ("get_block_table_v3", f"minicpm_sala::get_block_table_v3<{args}>")
+            ("get_block_table_v3", f"minicpm_sala::get_block_table<3, {args}>")
         )
     return load_jit(
         f"get_block_table_topk{topk}_g{head_group_num}_b{block_size}",
         *args,
         cuda_files=["minicpm_sala/get_block_table.cuh"],
         cuda_wrappers=wrappers,
-        extra_include_paths=_get_cccl_include_paths(),
     )
 
 

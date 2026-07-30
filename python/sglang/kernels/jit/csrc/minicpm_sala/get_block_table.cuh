@@ -10,7 +10,6 @@
 #pragma once
 
 #include <sgl_kernel/tensor.h>  // For TensorMatcher, SymbolicSize, SymbolicDevice
-#include <sgl_kernel/utils.h>   // For RuntimeCheck
 
 #include <sgl_kernel/utils.cuh>  // For LaunchKernel
 
@@ -170,14 +169,15 @@ void verify_inputs(
 
 }  // namespace
 
-template <int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
-void get_block_table_v2(
+template <int kVersion, int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
+void get_block_table(
     tvm::ffi::TensorView out,
     tvm::ffi::TensorView topk_idx,
     tvm::ffi::TensorView block_table,
     tvm::ffi::TensorView token_to_bs,
     tvm::ffi::TensorView token_pos_in_bs,
     tvm::ffi::TensorView seqlen_q) {
+  static_assert(kVersion == 2 || kVersion == 3);
   using namespace host;
   SymbolicSize token_num{"token_num"}, batch_size{"batch_size"}, seqlen_q_max{"seqlen_q_max"};
   SymbolicDevice device;
@@ -190,54 +190,33 @@ void get_block_table_v2(
   const DLDevice dev = device.unwrap();
 
   constexpr int kThreadsPerBlock = 1024;
-  const int64_t total = static_cast<int64_t>(n_token) * kHeadGroup * kSparseTopK;
+  constexpr int kElementsPerEntry = kVersion == 2 ? 1 : kSparseBlockSize;
+  const int64_t total = static_cast<int64_t>(n_token) * kHeadGroup * kSparseTopK * kElementsPerEntry;
   const int64_t num_blocks = (total + kThreadsPerBlock - 1) / kThreadsPerBlock;
 
-  LaunchKernel(num_blocks, kThreadsPerBlock, dev)(
-      get_block_table_cuda_v2<kSparseTopK, kHeadGroup, kSparseBlockSize>,
-      static_cast<const int*>(topk_idx.data_ptr()),
-      static_cast<const int*>(block_table.data_ptr()),
-      static_cast<const int*>(token_to_bs.data_ptr()),
-      static_cast<const int*>(token_pos_in_bs.data_ptr()),
-      static_cast<const int*>(seqlen_q.data_ptr()),
-      static_cast<int*>(out.data_ptr()),
-      s_q_max,
-      n_token);
-}
-
-template <int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
-void get_block_table_v3(
-    tvm::ffi::TensorView out,
-    tvm::ffi::TensorView topk_idx,
-    tvm::ffi::TensorView block_table,
-    tvm::ffi::TensorView token_to_bs,
-    tvm::ffi::TensorView token_pos_in_bs,
-    tvm::ffi::TensorView seqlen_q) {
-  using namespace host;
-  SymbolicSize token_num{"token_num"}, batch_size{"batch_size"}, seqlen_q_max{"seqlen_q_max"};
-  SymbolicDevice device;
-  device.set_options<kDLCUDA>();
-  verify_inputs<kSparseTopK, kHeadGroup, kSparseBlockSize>(
-      out, topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q, token_num, batch_size, seqlen_q_max, device);
-
-  const int n_token = static_cast<int>(token_num.unwrap());
-  const int s_q_max = static_cast<int>(seqlen_q_max.unwrap());
-  const DLDevice dev = device.unwrap();
-
-  constexpr int kThreadsPerBlock = 1024;
-  const int64_t total = static_cast<int64_t>(n_token) * kHeadGroup * kSparseTopK * kSparseBlockSize;
-  const int64_t num_blocks = (total + kThreadsPerBlock - 1) / kThreadsPerBlock;
-
-  LaunchKernel(num_blocks, kThreadsPerBlock, dev)(
-      get_block_table_cuda_v3<kSparseTopK, kHeadGroup, kSparseBlockSize>,
-      static_cast<const int*>(topk_idx.data_ptr()),
-      static_cast<const int*>(block_table.data_ptr()),
-      static_cast<const int*>(token_to_bs.data_ptr()),
-      static_cast<const int*>(token_pos_in_bs.data_ptr()),
-      static_cast<const int*>(seqlen_q.data_ptr()),
-      static_cast<int*>(out.data_ptr()),
-      s_q_max,
-      n_token);
+  if constexpr (kVersion == 2) {
+    LaunchKernel(num_blocks, kThreadsPerBlock, dev)(
+        get_block_table_cuda_v2<kSparseTopK, kHeadGroup, kSparseBlockSize>,
+        static_cast<const int*>(topk_idx.data_ptr()),
+        static_cast<const int*>(block_table.data_ptr()),
+        static_cast<const int*>(token_to_bs.data_ptr()),
+        static_cast<const int*>(token_pos_in_bs.data_ptr()),
+        static_cast<const int*>(seqlen_q.data_ptr()),
+        static_cast<int*>(out.data_ptr()),
+        s_q_max,
+        n_token);
+  } else {
+    LaunchKernel(num_blocks, kThreadsPerBlock, dev)(
+        get_block_table_cuda_v3<kSparseTopK, kHeadGroup, kSparseBlockSize>,
+        static_cast<const int*>(topk_idx.data_ptr()),
+        static_cast<const int*>(block_table.data_ptr()),
+        static_cast<const int*>(token_to_bs.data_ptr()),
+        static_cast<const int*>(token_pos_in_bs.data_ptr()),
+        static_cast<const int*>(seqlen_q.data_ptr()),
+        static_cast<int*>(out.data_ptr()),
+        s_q_max,
+        n_token);
+  }
 }
 
 }  // namespace minicpm_sala

@@ -56,8 +56,6 @@ class MiniCPMHybridConfig(PretrainedConfig):
         dim_model_base=256,
         # MiniCPM-specific hybrid config fields
         mixer_types=None,
-        minicpm4=None,
-        lightning=None,
         lightning_nh=None,
         lightning_nkv=None,
         lightning_head_dim=None,
@@ -78,11 +76,12 @@ class MiniCPMHybridConfig(PretrainedConfig):
         sparse_kernel_stride=16,
         sparse_topk=8,
         sparse_window_size=64,
-        sparse_use_nope=False,
         **kwargs,
     ):
         # Pop structured MiniCPM fields before PretrainedConfig stores unknown kwargs.
         sparse_config = kwargs.pop("sparse_config", None)
+        for unused_field in ("minicpm4", "lightning", "sparse_use_nope"):
+            kwargs.pop(unused_field, None)
 
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -116,8 +115,6 @@ class MiniCPMHybridConfig(PretrainedConfig):
             raise ValueError(f"Unsupported mixer type: {exc.args[0]}") from exc
         repeats = (num_hidden_layers + len(mixer_types) - 1) // len(mixer_types)
         self.mixer_types = (mixer_types * repeats)[:num_hidden_layers]
-        self.minicpm4 = minicpm4
-        self.lightning = lightning
         self.lightning_nh = (
             lightning_nh if lightning_nh is not None else num_attention_heads
         )
@@ -154,7 +151,6 @@ class MiniCPMHybridConfig(PretrainedConfig):
         self.sparse_kernel_stride = sparse_kernel_stride
         self.sparse_topk = sparse_topk
         self.sparse_window_size = sparse_window_size
-        self.sparse_use_nope = sparse_use_nope
         # Load sparse_config from original config if available (for backward compatibility)
         self.has_sparse_config = sparse_config is not None
         if sparse_config is not None:
@@ -177,7 +173,6 @@ class MiniCPMHybridConfig(PretrainedConfig):
             self.sparse_window_size = sparse_config.get(
                 "window_size", self.sparse_window_size
             )
-            self.sparse_use_nope = sparse_config.get("use_nope", self.sparse_use_nope)
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -234,13 +229,6 @@ class MiniCPMHybridConfig(PretrainedConfig):
     def has_lightning_layers(self) -> bool:
         """Check if this config has lightning attention layers."""
         return any(mt == "lightning-attn" for mt in self.mixer_types)
-
-    @property
-    def sparse_layer_ids(self) -> list:
-        """Get the indices of layers with sparse attention."""
-        if not self.has_sparse_config:
-            return []
-        return [i for i, mt in enumerate(self.mixer_types) if mt == "minicpm4"]
 
     @property
     def lightning_layer_ids(self) -> list:
