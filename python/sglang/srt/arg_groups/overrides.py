@@ -770,9 +770,7 @@ def _minicpm_sala_overrides(server_args: Any, hf_config: Any) -> dict:
             "prefill_attention_backend",
             "decode_attention_backend",
         ):
-            dense_backend = dense_backends.get(
-                getattr(server_args, backend_field)
-            )
+            dense_backend = dense_backends.get(getattr(server_args, backend_field))
             if dense_backend is not None:
                 overrides[backend_field] = dense_backend
     elif has_sparse_attention:
