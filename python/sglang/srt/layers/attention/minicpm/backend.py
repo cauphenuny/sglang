@@ -361,7 +361,9 @@ class MiniCPMSparseBackend(AttentionBackend):
             metadata.sparse_idx = prefill_metadata["sparse_idx"]
 
             # Stage1 optimization metadata for prefill mode
-            metadata.cache_seqlens_int32_stage1 = metadata.base.cache_seqlens_int32 - 1
+            metadata.cache_seqlens_int32_stage1 = (
+                metadata.base.cache_seqlens_int32[metadata.sparse_bs_list] - 1
+            )
             if seqlen_q_sparse_bs:
                 seqlen_q_sparse_tensor = torch.tensor(
                     seqlen_q_sparse_bs,

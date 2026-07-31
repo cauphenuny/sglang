@@ -338,6 +338,51 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             [0, 71, 142, 214, 286, 350, 414],
         )
 
+    def test_mixed_prefill_compacts_stage1_cache_lengths(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        backend.req_to_sparse_k1_token = torch.empty(0)
+        backend.req_to_sparse_k2_token = torch.empty(0)
+        backend.k1_kernel_size = 32
+        backend.k1_kernel_stride = 16
+        backend.k2_kernel_size = 128
+        backend.k2_kernel_stride = 64
+        backend.dense_len = 100
+        backend.head_group_num = 1
+        backend.sparse_topk = 2
+        backend.block_size = 64
+        backend.heads_per_group = 16
+
+        forward_batch = SimpleNamespace(
+            batch_size=2,
+            seq_lens_cpu=torch.tensor([50, 200], dtype=torch.int32),
+            seq_lens=torch.tensor([50, 200], dtype=torch.int32),
+            extend_seq_lens_cpu=[1, 1],
+            extend_prefix_lens_cpu=[49, 199],
+            req_pool_indices=torch.tensor([0, 1], dtype=torch.int64),
+            forward_mode=SimpleNamespace(
+                is_extend_or_draft_extend_or_mixed=lambda: True
+            ),
+        )
+        metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(
+                cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32),
+                cache_seqlens_int32=torch.tensor([50, 200], dtype=torch.int32),
+                page_table=torch.zeros((2, 200), dtype=torch.int32),
+                max_seq_len_q=1,
+            )
+        )
+        level = CompressionLevelMetadata()
+
+        with patch.object(
+            backend_module,
+            "_build_k1_k2_compression_metadata",
+            return_value={"k1": level, "k2": level},
+        ):
+            backend.update_batch_for_sparse(forward_batch, metadata)
+
+        self.assertEqual(metadata.sparse_bs_list, [1])
+        self.assertEqual(metadata.cache_seqlens_int32_stage1.tolist(), [199])
+
     def test_dense_decode_page_table_covers_dense_threshold(self):
         """Dense decode must reserve page-table coverage through the dense threshold."""
         forward_batch = SimpleNamespace(
