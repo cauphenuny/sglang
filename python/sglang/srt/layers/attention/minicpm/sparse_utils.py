@@ -272,12 +272,6 @@ def compressed_attention(
     with torch.no_grad():
         batch_size = cu_seqlens_q.shape[0] - 1
 
-        current_ratio = q.shape[-2] // k.shape[-2]
-        required_ratio = 16
-        if current_ratio < required_ratio:
-            repeat_times = required_ratio // current_ratio
-            q = q.repeat_interleave(repeat_times, dim=-2)
-
         is_prefilling = max_seqlen_q > 1
 
         if is_prefilling:

@@ -177,6 +177,11 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.head_dim = model_runner.model_config.head_dim
         self.head_group_num = self.num_kv_heads
         self.heads_per_group = self.num_q_heads // self.head_group_num
+        if self.heads_per_group != 16:
+            raise ValueError(
+                "MiniCPM sparse attention requires 16 query heads per KV head, "
+                f"got {self.heads_per_group}."
+            )
         self.k1_kernel_size = self.kernel_size
         self.k1_kernel_stride = self.kernel_stride
         self.k2_kernel_size = self.kernel_size * 4
@@ -185,11 +190,6 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.minicpm_fuse_topk = (
             use_blackwell and use_flashinfer
         ) or envs.SGLANG_MINICPM_FUSE_TOPK.get()
-        if self.minicpm_fuse_topk and self.heads_per_group != 16:
-            raise ValueError(
-                "MiniCPM fused top-k currently requires 16 query heads per KV head, "
-                f"got {self.heads_per_group}."
-            )
         dtype_str = str(self.model_dtype).removeprefix("torch.")
         if self.minicpm_fuse_topk and dtype_str not in ("bfloat16", "float16"):
             raise ValueError(

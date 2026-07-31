@@ -221,6 +221,25 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         ):
             MiniCPMSparseBackend(model_runner, use_flashinfer=True)
 
+        model_runner.server_args.attention_backend = "minicpm_flashattn"
+        with (
+            patch.object(backend_module, "MiniCPMHybridConfig", SimpleNamespace),
+            patch.object(backend_module, "is_blackwell_supported", return_value=False),
+            patch.object(
+                backend_module,
+                "FlashAttentionBackend",
+                return_value=flash_attn_backend,
+            ),
+            patch.object(
+                backend_module,
+                "get_parallel",
+                return_value=SimpleNamespace(attn_tp_size=1),
+            ),
+            patch.object(backend_module, "attach_compressed_cache"),
+            self.assertRaisesRegex(ValueError, "16 query heads per KV head"),
+        ):
+            MiniCPMSparseBackend(model_runner, use_flashinfer=False)
+
     def test_dense_as_sparse_routes_short_prefill(self):
         req_pool = SimpleNamespace(
             req_to_sparse_k1_token=torch.empty(0),
