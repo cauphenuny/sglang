@@ -9,7 +9,6 @@ from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.allocator.base import BaseTokenToKVPoolAllocator
-    from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
     from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 
 
@@ -91,7 +90,6 @@ class MiniCPMCompressedCache:
     def alloc_to_lengths(
         self,
         *,
-        tree_cache: BasePrefixCache,
         req_pool_indices_cpu: torch.Tensor,
         target_seq_lens_cpu: torch.Tensor,
     ) -> None:
@@ -113,9 +111,6 @@ class MiniCPMCompressedCache:
                 if target > self.allocated_lens[level][req_idx]
             ]
             plans.append((table, rows, sum(end - start for _, start, end in rows)))
-
-        if tree_cache.token_to_kv_pool_allocator is not self.allocator:
-            raise RuntimeError("MiniCPM compressed cache allocator changed")
 
         allocated = []
         try:

@@ -49,20 +49,6 @@ class RecordingAllocator:
         self.live.clear()
 
 
-class ChunkCacheStub:
-    def __init__(self, allocator: RecordingAllocator):
-        self.token_to_kv_pool_allocator = allocator
-
-    def is_chunk_cache(self):
-        return True
-
-    def available_and_evictable_str(self):
-        return f"available={self.token_to_kv_pool_allocator.available_size()}"
-
-    def pretty_print(self):
-        return ""
-
-
 def make_pool_and_req(capacity: int = 64):
     allocator = RecordingAllocator(capacity)
     pool = ReqToTokenPool(
@@ -84,63 +70,60 @@ def make_pool_and_req(capacity: int = 64):
         kv_committed_len=0,
     )
     req_pool_idx = pool.alloc([req])[0]
-    return pool, req, req_pool_idx, allocator, ChunkCacheStub(allocator)
+    return pool, req, req_pool_idx, allocator
 
 
-def alloc_extend(pool, tree_cache, req_pool_idx: int, seq_len: int):
+def alloc_extend(pool, req_pool_idx: int, seq_len: int):
     pool.alloc_aux_to_lengths(
-        tree_cache=tree_cache,
         req_pool_indices_cpu=torch.tensor([req_pool_idx], dtype=torch.int64),
         target_seq_lens_cpu=torch.tensor([seq_len], dtype=torch.int64),
     )
 
 
 def test_extend_allocates_at_sparse_boundaries():
-    pool, _, req_pool_idx, allocator, tree_cache = make_pool_and_req()
+    pool, _, req_pool_idx, allocator = make_pool_and_req()
     cache = pool._aux_cache
 
-    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=3)
+    alloc_extend(pool, req_pool_idx, seq_len=3)
     assert allocator.available_size() == 39
     assert len(cache.free_slots) == 25
 
-    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=4)
+    alloc_extend(pool, req_pool_idx, seq_len=4)
     assert allocator.available_size() == 39
     assert len(cache.free_slots) == 24
 
-    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=16)
+    alloc_extend(pool, req_pool_idx, seq_len=16)
     assert allocator.available_size() == 39
     assert len(cache.free_slots) == 17
 
 
 def test_chunk_reuse_only_allocates_new_sparse_slots():
-    pool, _, req_pool_idx, _, tree_cache = make_pool_and_req()
+    pool, _, req_pool_idx, _ = make_pool_and_req()
     cache = pool._aux_cache
 
-    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=8)
+    alloc_extend(pool, req_pool_idx, seq_len=8)
     assert len(cache.free_slots) == 22
 
-    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=12)
+    alloc_extend(pool, req_pool_idx, seq_len=12)
     assert len(cache.free_slots) == 20
 
-    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=12)
+    alloc_extend(pool, req_pool_idx, seq_len=12)
     assert len(cache.free_slots) == 20
 
 
 def test_decode_does_not_duplicate_sparse_slots():
     """Retrying the same decode position must not allocate duplicate cache slots."""
-    pool, _, req_pool_idx, _, tree_cache = make_pool_and_req()
+    pool, _, req_pool_idx, _ = make_pool_and_req()
     cache = pool._aux_cache
-    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=15)
+    alloc_extend(pool, req_pool_idx, seq_len=15)
 
     pool.alloc_aux_to_lengths(
-        tree_cache=tree_cache,
         req_pool_indices_cpu=torch.tensor([req_pool_idx], dtype=torch.int64),
         target_seq_lens_cpu=torch.tensor([16], dtype=torch.int64),
     )
     available_after_first_decode = len(cache.free_slots)
 
     pool.alloc_aux_to_lengths(
-        tree_cache=tree_cache,
         req_pool_indices_cpu=torch.tensor([req_pool_idx], dtype=torch.int64),
         target_seq_lens_cpu=torch.tensor([16], dtype=torch.int64),
     )
@@ -170,7 +153,7 @@ def test_reserve_leaves_only_dense_capacity_visible():
 
 
 def test_reserved_slots_are_excluded_from_full_pool_invariant():
-    pool, _, _, allocator, _ = make_pool_and_req(capacity=69)
+    pool, _, _, allocator = make_pool_and_req(capacity=69)
     checker = SchedulerInvariantChecker(
         is_hybrid_swa=False,
         is_hybrid_ssm=True,
@@ -201,7 +184,7 @@ def test_reserved_slots_are_excluded_from_full_pool_invariant():
 
 
 def test_hybrid_pool_stats_exclude_reserved_slots():
-    pool, _, _, allocator, _ = make_pool_and_req(capacity=69)
+    pool, _, _, allocator = make_pool_and_req(capacity=69)
     pool.mamba_allocator = SimpleNamespace(available_size=lambda: 1)
     pool.mamba_pool = SimpleNamespace(size=1)
     observer = SchedulerPoolStatsObserver(
@@ -227,8 +210,8 @@ def test_hybrid_pool_stats_exclude_reserved_slots():
 
 
 def test_streaming_session_release_frees_compressed_slots():
-    pool, _, req_pool_idx, allocator, tree_cache = make_pool_and_req()
-    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=16)
+    pool, _, req_pool_idx, allocator = make_pool_and_req()
+    alloc_extend(pool, req_pool_idx, seq_len=16)
     dense_slots = allocator.alloc(16)
     pool.req_to_token[req_pool_idx, :16] = dense_slots.to(torch.int32)
     compressed_cache = pool._aux_cache
@@ -253,7 +236,7 @@ def test_streaming_session_release_frees_compressed_slots():
 
 
 def test_mamba_leak_diagnostic_does_not_report_reserved_slots():
-    pool, _, _, allocator, _ = make_pool_and_req(capacity=69)
+    pool, _, _, allocator = make_pool_and_req(capacity=69)
     allocator.free_pages = torch.arange(6, 70, dtype=torch.int64)
     allocator.release_pages = torch.empty(0, dtype=torch.int64)
     pool.mamba_pool = SimpleNamespace(size=1)
@@ -295,11 +278,11 @@ def test_mamba_leak_diagnostic_does_not_report_reserved_slots():
 
 def test_partial_failure_rolls_back_and_free_releases_every_slot():
     """A failed cache-level allocation must release slots allocated for other levels."""
-    pool, req, req_pool_idx, allocator, tree_cache = make_pool_and_req(capacity=18)
+    pool, req, req_pool_idx, allocator = make_pool_and_req(capacity=18)
     cache = pool._aux_cache
 
     with pytest.raises(RuntimeError, match="out of reserved slots"):
-        alloc_extend(pool, tree_cache, req_pool_idx, seq_len=16)
+        alloc_extend(pool, req_pool_idx, seq_len=16)
 
     assert allocator.available_size() == 11
     assert len(cache.free_slots) == 7
@@ -307,7 +290,7 @@ def test_partial_failure_rolls_back_and_free_releases_every_slot():
     allocator.capacity = 20
     allocator.clear()
     pool.reset_aux_cache_allocator()
-    alloc_extend(pool, tree_cache, req_pool_idx, seq_len=16)
+    alloc_extend(pool, req_pool_idx, seq_len=16)
     assert allocator.available_size() == 12
     assert len(cache.free_slots) == 0
 
@@ -318,7 +301,7 @@ def test_partial_failure_rolls_back_and_free_releases_every_slot():
 
 
 def test_allocator_reset_rebuilds_reserve():
-    pool, _, _, allocator, _ = make_pool_and_req()
+    pool, _, _, allocator = make_pool_and_req()
 
     allocator.clear()
     assert allocator.available_size() == 64

@@ -384,7 +384,6 @@ def alloc_for_extend(
     )
     try:
         batch.req_to_token_pool.alloc_aux_to_lengths(
-            tree_cache=batch.tree_cache,
             req_pool_indices_cpu=req_pool_indices_cpu,
             target_seq_lens_cpu=batch.seq_lens_cpu,
         )
@@ -598,7 +597,6 @@ def alloc_for_decode(batch: ScheduleBatch, token_per_req: int) -> torch.Tensor:
 
     try:
         batch.req_to_token_pool.alloc_aux_to_lengths(
-            tree_cache=batch.tree_cache,
             req_pool_indices_cpu=batch.req_pool_indices_cpu,
             target_seq_lens_cpu=batch.seq_lens_cpu + token_per_req,
         )

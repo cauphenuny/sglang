@@ -90,7 +90,6 @@ from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 if TYPE_CHECKING:
     from sglang.srt.managers.cache_controller import LayerDoneCounter
     from sglang.srt.managers.schedule_batch import Req
-    from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 
 
 logger = logging.getLogger(__name__)
@@ -342,13 +341,11 @@ class ReqToTokenPool:
     def alloc_aux_to_lengths(
         self,
         *,
-        tree_cache: BasePrefixCache,
         req_pool_indices_cpu: torch.Tensor,
         target_seq_lens_cpu: torch.Tensor,
     ) -> None:
         if self._aux_cache is not None:
             self._aux_cache.alloc_to_lengths(
-                tree_cache=tree_cache,
                 req_pool_indices_cpu=req_pool_indices_cpu,
                 target_seq_lens_cpu=target_seq_lens_cpu,
             )
