@@ -885,6 +885,14 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
         backend.forward_metadata = SimpleNamespace(
             sparse_batch_size=1,
+            sparse_bs_list=[1],
+            base=SimpleNamespace(
+                cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32),
+            ),
+            topk_cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            topk_cu_seqlens_k=torch.tensor([0, 1], dtype=torch.int32),
+            topk_max_seqlen_q=1,
+            topk_max_seqlen_k=1,
             k1=SimpleNamespace(
                 cu_seqlens=_DeviceOffsetsMustNotBeRead(),
                 cu_seqlens_cpu=[0, 0, 1],
@@ -909,20 +917,6 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                 "allocate_and_compress_keys",
                 return_value=(torch.ones(1, 1, 1), torch.ones(1, 1, 1)),
             ) as allocate,
-            patch.object(
-                backend_module,
-                "_build_prefill_topk_metadata",
-                return_value={
-                    "sparse_bs": [1],
-                    "k1_lens": [0, 1],
-                    "k2_lens": [0, 1],
-                    "cu_seqlens_q": torch.tensor([0, 1], dtype=torch.int32),
-                    "cu_seqlens_k": torch.tensor([0, 1], dtype=torch.int32),
-                    "max_seqlen_q": 1,
-                    "max_seqlen_k": 1,
-                    "query_states": torch.empty(1, 1, 1),
-                },
-            ),
             patch.object(
                 backend,
                 "_get_fused_topk_kernel",

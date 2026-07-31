@@ -471,6 +471,10 @@ class MiniCPMSparseMetadata(msgspec.Struct):
     cache_seqlens_int32_stage1: Optional[torch.Tensor] = None
     cu_seqlens_q_adjusted: Optional[torch.Tensor] = None
     max_seqlen_q_adjusted: int = 1
+    topk_cu_seqlens_q: Optional[torch.Tensor] = None
+    topk_cu_seqlens_k: Optional[torch.Tensor] = None
+    topk_max_seqlen_q: int = 1
+    topk_max_seqlen_k: int = 1
 
 
 def _build_sequence_lengths(
@@ -884,98 +888,4 @@ def _build_sparse_decode_metadata(
         "sparse_cu_seqlens_q": sparse_cu_seqlens_q,
         "sparse_page_table": sparse_page_table,
         "token_to_bs": token_to_bs,
-    }
-
-
-def _build_prefill_topk_metadata(
-    forward_batch: ForwardBatch,
-    query_states: torch.Tensor,
-    tp_q_head_num: int,
-    head_dim: int,
-    dense_len: int,
-    k1_metadata: CompressionLevelMetadata,
-    k2_metadata: CompressionLevelMetadata,
-) -> dict:
-    """Build prefill TopK metadata.
-
-    This method prepares all metadata needed for TopK computation in prefill mode,
-    including sparse batch identification, sequence lengths, and query preparation.
-
-    Args:
-        forward_batch: The forward batch
-        query_states: Query states from model layer
-        tp_q_head_num: Number of query heads
-        head_dim: Head dimension
-        dense_len: Dense length threshold
-        k1_metadata: K1 compression metadata
-        k2_metadata: K2 compression metadata
-
-    Returns:
-        Dictionary with prefill TopK metadata
-    """
-    bs, seqlens_q, seqlens_k = (
-        forward_batch.batch_size,
-        forward_batch.extend_seq_lens_cpu,
-        forward_batch.seq_lens_cpu,
-    )
-
-    k1_lens = [
-        end - start
-        for start, end in zip(
-            k1_metadata.cu_seqlens_cpu,
-            k1_metadata.cu_seqlens_cpu[1:],
-        )
-    ]
-    k2_lens = [
-        end - start
-        for start, end in zip(
-            k2_metadata.cu_seqlens_cpu,
-            k2_metadata.cu_seqlens_cpu[1:],
-        )
-    ]
-
-    sparse_bs = []
-    seqlens_q_sparse_bs = []
-    seqlens_k_sparse_bs = []
-
-    for i in range(bs):
-        if seqlens_k[i] >= dense_len:
-            sparse_bs.append(i)
-            seqlens_q_sparse_bs.append(seqlens_q[i])
-            seqlens_k_sparse_bs.append(int(seqlens_k[i]))
-
-    cu_seqlens_q = torch.cumsum(
-        torch.tensor([0] + seqlens_q, dtype=torch.int32, device=query_states.device),
-        dim=0,
-        dtype=torch.int32,
-    )
-
-    query_states_reshaped = query_states.reshape(-1, tp_q_head_num, head_dim)
-
-    query_states = batched_gather(query_states_reshaped, cu_seqlens_q, sparse_bs)
-
-    cu_seqlens_q_sparse = torch.cumsum(
-        torch.tensor(
-            [0] + seqlens_q_sparse_bs, dtype=torch.int32, device=query_states.device
-        ),
-        dim=0,
-        dtype=torch.int32,
-    )
-    cu_seqlens_k_sparse = torch.cumsum(
-        torch.tensor(
-            [0] + seqlens_k_sparse_bs, dtype=torch.int32, device=query_states.device
-        ),
-        dim=0,
-        dtype=torch.int32,
-    )
-
-    return {
-        "sparse_bs": sparse_bs,
-        "k1_lens": k1_lens,
-        "k2_lens": k2_lens,
-        "cu_seqlens_q": cu_seqlens_q_sparse,
-        "cu_seqlens_k": cu_seqlens_k_sparse,
-        "max_seqlen_q": max(seqlens_q_sparse_bs),
-        "max_seqlen_k": max(seqlens_k_sparse_bs),
-        "query_states": query_states,
     }

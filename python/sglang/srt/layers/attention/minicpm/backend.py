@@ -38,12 +38,12 @@ from sglang.srt.layers.attention.minicpm.sparse_utils import (
     CompressionLevelMetadata,
     MiniCPMSparseMetadata,
     _build_k1_k2_compression_metadata,
-    _build_prefill_topk_metadata,
     _build_sequence_lengths,
     _build_sparse_decode_metadata,
     _build_sparse_prefill_metadata,
     _build_token_mappings,
     allocate_and_compress_keys,
+    batched_gather,
     compressed_attention,
     compressed_attention_tilelang,
     get_compress_k_v2,
@@ -365,6 +365,20 @@ class MiniCPMSparseBackend(AttentionBackend):
                     torch.cumsum(seqlen_q_sparse_tensor, dim=0, dtype=torch.int32),
                     (1, 0),
                 )
+                metadata.topk_cu_seqlens_q = cu_seqlen_q_sparse_tensor
+                metadata.topk_cu_seqlens_k = F.pad(
+                    torch.cumsum(
+                        metadata.seqlen_k_sparse_bs_tensor,
+                        dim=0,
+                        dtype=torch.int32,
+                    ),
+                    (1, 0),
+                )
+                metadata.topk_max_seqlen_q = max(seqlen_q_sparse_bs)
+                metadata.topk_max_seqlen_k = max(
+                    int(forward_batch.seq_lens_cpu[bs])
+                    for bs in metadata.sparse_bs_list
+                )
                 metadata.cu_seqlens_q_adjusted = (
                     cu_seqlen_q_sparse_tensor * self.heads_per_group
                 )
@@ -501,68 +515,14 @@ class MiniCPMSparseBackend(AttentionBackend):
         is_prefill=True,
     ):
         if is_prefill:
-            all_sparse = (
-                self.forward_metadata.sparse_batch_size == forward_batch.batch_size
-            )
-            if all_sparse:
-                metadata = self.forward_metadata
-                compressed_k, compressed_k2 = allocate_and_compress_keys(
-                    layer=layer,
-                    forward_batch=forward_batch,
-                    metadata=metadata,
-                    k1_token_nums=metadata.k1.cu_seqlens_cpu[-1],
-                    k2_token_nums=metadata.k2.cu_seqlens_cpu[-1],
-                    k1_kernel_size=self.k1_kernel_size,
-                    k1_kernel_stride=self.k1_kernel_stride,
-                    k2_kernel_size=self.k2_kernel_size,
-                    k2_kernel_stride=self.k2_kernel_stride,
-                    dtype=key_states.dtype,
-                    device=key_states.device,
-                    max_context_length=self.max_context_len,
-                )
-
-                cu_seqlens_k = metadata.base.cu_seqlens_k
-                max_seqlen_in_batch_k = metadata.base.max_seq_len_k
-                cu_seqlens_q = metadata.base.cu_seqlens_q
-                max_seqlen_in_batch_q = metadata.base.max_seq_len_q
-
-                ret = self.sparse_get_topk_impl(
-                    query_states,
-                    cu_seqlens_q,
-                    cu_seqlens_k,
-                    max_seqlen_in_batch_q,
-                    max_seqlen_in_batch_k,
-                    compressed_k=compressed_k,
-                    compressed_cu_seqlens=metadata.k1.cu_seqlens,
-                    compressed_k2=compressed_k2,
-                    compressed_cu_seqlens2=metadata.k2.cu_seqlens,
-                    fused_kernel=self._get_fused_topk_kernel(
-                        forward_batch.batch_size,
-                        is_prefill=True,
-                    ),
-                )
-                return ret
-
-            topk_metadata = _build_prefill_topk_metadata(
-                forward_batch=forward_batch,
-                query_states=query_states,
-                tp_q_head_num=layer.tp_q_head_num,
-                head_dim=layer.head_dim,
-                dense_len=self.dense_len,
-                k1_metadata=self.forward_metadata.k1,
-                k2_metadata=self.forward_metadata.k2,
-            )
-
-            sparse_bs = topk_metadata["sparse_bs"]
-            k1_lens = topk_metadata["k1_lens"]
-            k2_lens = topk_metadata["k2_lens"]
-
+            metadata = self.forward_metadata
+            sparse_bs = metadata.sparse_bs_list
             full_compressed_k1, full_compressed_k2 = allocate_and_compress_keys(
                 layer=layer,
                 forward_batch=forward_batch,
-                metadata=self.forward_metadata,
-                k1_token_nums=sum(k1_lens),
-                k2_token_nums=sum(k2_lens),
+                metadata=metadata,
+                k1_token_nums=metadata.k1.cu_seqlens_cpu[-1],
+                k2_token_nums=metadata.k2.cu_seqlens_cpu[-1],
                 k1_kernel_size=self.k1_kernel_size,
                 k1_kernel_stride=self.k1_kernel_stride,
                 k2_kernel_size=self.k2_kernel_size,
@@ -572,73 +532,56 @@ class MiniCPMSparseBackend(AttentionBackend):
                 max_context_length=self.max_context_len,
             )
 
-            pt_k1, pt_k2 = 0, 0
-            compressed_k = torch.zeros(
-                (
-                    sum(k1_lens[i] for i in sparse_bs),
-                    layer.tp_k_head_num,
-                    layer.head_dim,
-                ),
-                dtype=key_states.dtype,
-                device=key_states.device,
-            )
-            compressed_k2 = torch.zeros(
-                (
-                    sum(k2_lens[i] for i in sparse_bs),
-                    layer.tp_k_head_num,
-                    layer.head_dim,
-                ),
-                dtype=key_states.dtype,
-                device=key_states.device,
-            )
-
-            compressed_cu_seqlens, compressed_cu_seqlens2 = [0], [0]
-
-            for sparse_bs_idx in sparse_bs:
-                start = self.forward_metadata.k1.cu_seqlens_cpu[sparse_bs_idx]
-                end = self.forward_metadata.k1.cu_seqlens_cpu[sparse_bs_idx + 1]
-                k1_len = k1_lens[sparse_bs_idx]
-                compressed_k[pt_k1 : pt_k1 + k1_len, :, :] = full_compressed_k1[
-                    start:end, :, :
+            compressed = []
+            if len(sparse_bs) == forward_batch.batch_size:
+                compressed = [
+                    (full_compressed_k1, metadata.k1.cu_seqlens),
+                    (full_compressed_k2, metadata.k2.cu_seqlens),
                 ]
+            else:
+                query_states = batched_gather(
+                    query_states.reshape(-1, layer.tp_q_head_num, layer.head_dim),
+                    metadata.base.cu_seqlens_q,
+                    sparse_bs,
+                )
+                for full_compressed_k, level in (
+                    (full_compressed_k1, metadata.k1),
+                    (full_compressed_k2, metadata.k2),
+                ):
+                    lengths = [
+                        level.cu_seqlens_cpu[bs + 1] - level.cu_seqlens_cpu[bs]
+                        for bs in sparse_bs
+                    ]
+                    compact_k = torch.cat(
+                        [
+                            full_compressed_k[
+                                level.cu_seqlens_cpu[bs] : level.cu_seqlens_cpu[bs + 1]
+                            ]
+                            for bs in sparse_bs
+                        ]
+                    )
+                    compact_cu_seqlens = torch.tensor(
+                        [0, *lengths], dtype=torch.int32, device=key_states.device
+                    ).cumsum(0)
+                    compressed.append((compact_k, compact_cu_seqlens))
 
-                start2 = self.forward_metadata.k2.cu_seqlens_cpu[sparse_bs_idx]
-                end2 = self.forward_metadata.k2.cu_seqlens_cpu[sparse_bs_idx + 1]
-                k2_len = k2_lens[sparse_bs_idx]
-                compressed_k2[pt_k2 : pt_k2 + k2_len, :, :] = full_compressed_k2[
-                    start2:end2, :, :
-                ]
-
-                pt_k1 += k1_len
-                pt_k2 += k2_len
-                compressed_cu_seqlens.append(compressed_cu_seqlens[-1] + k1_len)
-                compressed_cu_seqlens2.append(compressed_cu_seqlens2[-1] + k2_len)
-
-            compressed_cu_seqlens = torch.tensor(
-                compressed_cu_seqlens, dtype=torch.int32, device=key_states.device
-            )
-            compressed_cu_seqlens2 = torch.tensor(
-                compressed_cu_seqlens2, dtype=torch.int32, device=key_states.device
-            )
-
-            cu_seqlens_q = topk_metadata["cu_seqlens_q"]
-            cu_seqlens_k = topk_metadata["cu_seqlens_k"]
-            max_seqlen_in_batch_q = topk_metadata["max_seqlen_q"]
-            max_seqlen_in_batch_k = topk_metadata["max_seqlen_k"]
-            query_states = topk_metadata["query_states"]
+            (compressed_k, compressed_cu_seqlens), (
+                compressed_k2,
+                compressed_cu_seqlens2,
+            ) = compressed
 
             ret = self.sparse_get_topk_impl(
                 query_states,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                max_seqlen_in_batch_q,
-                max_seqlen_in_batch_k,
+                metadata.topk_cu_seqlens_q,
+                metadata.topk_cu_seqlens_k,
+                metadata.topk_max_seqlen_q,
+                metadata.topk_max_seqlen_k,
                 compressed_k=compressed_k,
                 compressed_cu_seqlens=compressed_cu_seqlens,
                 compressed_k2=compressed_k2,
                 compressed_cu_seqlens2=compressed_cu_seqlens2,
                 fused_kernel=self._get_fused_topk_kernel(
-                    len(sparse_bs),
+                    metadata.sparse_batch_size,
                     is_prefill=True,
                 ),
             )
