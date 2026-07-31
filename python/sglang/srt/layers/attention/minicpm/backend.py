@@ -97,10 +97,10 @@ class MiniCPMSparseBackend(AttentionBackend):
         model_runner: ModelRunner,
         skip_prefill: bool = False,
         fa_impl_ver=3,
+        *,
+        use_flashinfer: bool,
     ):
         super().__init__()
-        attention_backend = model_runner.server_args.attention_backend
-        use_flashinfer = attention_backend == "minicpm_flashinfer"
         use_blackwell = is_blackwell_supported()
         if use_blackwell:
             fa_impl_ver = 4
@@ -243,12 +243,6 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.prefill_kernel_max_seqlen_q_grid = (
             model_runner.server_args.chunked_prefill_size
         )
-
-        if attention_backend not in ("minicpm_flashattn", "minicpm_flashinfer"):
-            raise ValueError(
-                "MiniCPM sparse attention requires "
-                "attention_backend='minicpm_flashattn' or 'minicpm_flashinfer'."
-            )
 
         self.attention_adapter = (
             MiniCPMFlashInferAdapter(

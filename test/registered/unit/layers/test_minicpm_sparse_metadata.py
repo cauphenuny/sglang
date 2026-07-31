@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from sglang.srt.layers.attention import attention_registry
 from sglang.srt.layers.attention.minicpm import backend as backend_module
 from sglang.srt.layers.attention.minicpm import sparse_utils
 from sglang.srt.layers.attention.minicpm.attention_adapter import (
@@ -35,6 +36,28 @@ class _DeviceOffsetsMustNotBeRead:
 
 
 class TestMiniCPMSparseMetadata(CustomTestCase):
+    def test_registered_variants_select_adapter_explicitly(self):
+        runner = object()
+
+        def build(_runner, *, use_flashinfer):
+            self.assertIs(_runner, runner)
+            return use_flashinfer
+
+        with patch.object(
+            backend_module,
+            "MiniCPMSparseBackend",
+            side_effect=build,
+        ):
+            flashattn = attention_registry.ATTENTION_BACKENDS["minicpm_flashattn"](
+                runner
+            )
+            flashinfer = attention_registry.ATTENTION_BACKENDS["minicpm_flashinfer"](
+                runner
+            )
+
+        self.assertFalse(flashattn)
+        self.assertTrue(flashinfer)
+
     def test_sparse_metadata_does_not_patch_base_metadata(self):
         base_metadata = SimpleNamespace()
         metadata_type = getattr(sparse_utils, "MiniCPMSparseMetadata")
@@ -133,7 +156,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             ),
             patch.object(backend_module, "attach_compressed_cache"),
         ):
-            backend = MiniCPMSparseBackend(model_runner)
+            backend = MiniCPMSparseBackend(model_runner, use_flashinfer=False)
 
         flash_attention.assert_called_once_with(
             model_runner,
@@ -174,7 +197,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             ),
             patch.object(backend_module, "attach_compressed_cache"),
         ):
-            backend = MiniCPMSparseBackend(model_runner)
+            backend = MiniCPMSparseBackend(model_runner, use_flashinfer=True)
 
         self.assertIs(backend.flash_attn_backend, flash_attn_backend)
         self.assertIs(backend.attention_adapter, flashinfer_adapter)
@@ -196,7 +219,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             patch.object(backend_module, "attach_compressed_cache"),
             self.assertRaisesRegex(ValueError, "16 query heads per KV head"),
         ):
-            MiniCPMSparseBackend(model_runner)
+            MiniCPMSparseBackend(model_runner, use_flashinfer=True)
 
     def test_dense_as_sparse_routes_short_prefill(self):
         req_pool = SimpleNamespace(
@@ -256,7 +279,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             ),
             patch.object(backend_module, "attach_compressed_cache"),
         ):
-            backend = MiniCPMSparseBackend(model_runner)
+            backend = MiniCPMSparseBackend(model_runner, use_flashinfer=False)
 
         forward_batch = SimpleNamespace(
             batch_size=1,

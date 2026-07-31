@@ -278,11 +278,17 @@ def create_dual_chunk_flash_attn_backend(runner):
 
 
 @register_attention_backend("minicpm_flashattn")
-@register_attention_backend("minicpm_flashinfer")
-def create_minicpm_backend(runner):
+def create_minicpm_flashattn_backend(runner):
     from sglang.srt.layers.attention.minicpm.backend import MiniCPMSparseBackend
 
-    return MiniCPMSparseBackend(runner)
+    return MiniCPMSparseBackend(runner, use_flashinfer=False)
+
+
+@register_attention_backend("minicpm_flashinfer")
+def create_minicpm_flashinfer_backend(runner):
+    from sglang.srt.layers.attention.minicpm.backend import MiniCPMSparseBackend
+
+    return MiniCPMSparseBackend(runner, use_flashinfer=True)
 
 
 def attn_backend_wrapper(runner: "ModelRunner", full_attn_backend: "AttentionBackend"):
