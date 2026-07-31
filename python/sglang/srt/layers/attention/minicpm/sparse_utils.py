@@ -476,32 +476,14 @@ class MiniCPMSparseMetadata(msgspec.Struct):
 
 
 def _compute_single_compression_metadata(
-    forward_batch: ForwardBatch,
-    base_metadata: FlashAttentionMetadata,
+    seq_lens_cpu: torch.Tensor,
+    token_nums: torch.Tensor,
+    history_lens: torch.Tensor,
+    req_pool_indices: torch.Tensor,
     req_to_sparse_token: torch.Tensor,
     kernel_size: int,
     kernel_stride: int,
-    cu_seqlens_q: torch.Tensor,
 ) -> CompressionLevelMetadata:
-    """Compute compression metadata for a single compression level (k1 or k2).
-
-    Args:
-        forward_batch: The forward batch to analyze
-        base_metadata: Base metadata with cu_seqlens_q, cu_seqlens_k
-        req_to_sparse_token: Mapping from request pool to sparse tokens
-        kernel_size: Kernel size for compression
-        kernel_stride: Kernel stride for compression
-        cu_seqlens_q: Cumulative query sequence lengths
-
-    Returns:
-        Compression metadata for this level
-    """
-    bs = forward_batch.batch_size
-    seq_lens_cpu = torch.as_tensor(
-        forward_batch.seq_lens_cpu,
-        dtype=base_metadata.cu_seqlens_q.dtype,
-        device="cpu",
-    )
     seqlen_cpu = torch.clamp(
         (seq_lens_cpu - kernel_size) // kernel_stride + 1,
         min=0,
@@ -511,41 +493,23 @@ def _compute_single_compression_metadata(
         torch.cumsum(seqlen_cpu, dim=0, dtype=torch.int32), (1, 0)
     ).tolist()
     cu_seqlens = F.pad(
-        torch.cumsum(
-            seqlen_cpu.to(device=cu_seqlens_q.device), dim=0, dtype=torch.int32
-        ),
+        torch.cumsum(seqlen_cpu.to(device=token_nums.device), dim=0, dtype=torch.int32),
         (1, 0),
     )
-    token_table = req_to_sparse_token[forward_batch.req_pool_indices]
-
-    # CUDA graph replay uses metadata buffers sized for the captured batch,
-    # while ``forward_batch`` contains only the real (unpadded) requests.
-    # Restrict the cumulative sequence-length views to the real batch so
-    # all per-request compression metadata has exactly ``bs`` entries.
-    token_nums = (
-        base_metadata.cu_seqlens_k[1 : bs + 1] - base_metadata.cu_seqlens_k[:bs]
-    )
-    input_lens = cu_seqlens_q[1 : bs + 1] - cu_seqlens_q[:bs]
-    history_lens = token_nums - input_lens
-
-    history_compress_token_nums = torch.maximum(
+    token_table = req_to_sparse_token[req_pool_indices]
+    history_compress_token_nums = torch.clamp(
         (history_lens - kernel_size) // kernel_stride + 1,
-        torch.zeros(1, device=history_lens.device, dtype=torch.int32),
+        min=0,
     )
-
     new_token_nums = token_nums - history_compress_token_nums * kernel_stride
-
     cu_new_token_nums = F.pad(
         torch.cumsum(new_token_nums, dim=0, dtype=torch.int32), (1, 0)
     )
-
-    new_compress_token_nums = torch.maximum(
+    new_compress_token_nums = torch.clamp(
         (new_token_nums - kernel_size) // kernel_stride + 1,
-        torch.zeros(1, device=new_token_nums.device, dtype=torch.int32),
+        min=0,
     )
-
     total_compress_token_nums = history_compress_token_nums + new_compress_token_nums
-
     cu_total_compress_token_nums = F.pad(
         torch.cumsum(total_compress_token_nums, dim=0, dtype=torch.int32), (1, 0)
     )
@@ -570,44 +534,34 @@ def _build_k1_k2_compression_metadata(
     k2_kernel_size: int,
     k2_kernel_stride: int,
     cu_seqlens_q: torch.Tensor,
-) -> dict[str, CompressionLevelMetadata]:
-    """Build k1/k2 compression metadata.
+) -> tuple[CompressionLevelMetadata, CompressionLevelMetadata]:
+    bs = forward_batch.batch_size
+    seq_lens_cpu = torch.as_tensor(
+        forward_batch.seq_lens_cpu,
+        dtype=base_metadata.cu_seqlens_q.dtype,
+        device="cpu",
+    )
+    token_nums = (
+        base_metadata.cu_seqlens_k[1 : bs + 1] - base_metadata.cu_seqlens_k[:bs]
+    )
+    input_lens = cu_seqlens_q[1 : bs + 1] - cu_seqlens_q[:bs]
+    history_lens = token_nums - input_lens
 
-    This method computes all k1/k2 compressed cache metadata needed for
-    sparse attention by calling _compute_single_compression_metadata for each level.
-
-    Args:
-        forward_batch: The forward batch to analyze
-        base_metadata: Base metadata with cu_seqlens_q, cu_seqlens_k
-        req_to_sparse_k1_token: Mapping from request pool to sparse k1 tokens
-        req_to_sparse_k2_token: Mapping from request pool to sparse k2 tokens
-        k1_kernel_size: Kernel size for k1 compression
-        k1_kernel_stride: Kernel stride for k1 compression
-        k2_kernel_size: Kernel size for k2 compression
-        k2_kernel_stride: Kernel stride for k2 compression
-        cu_seqlens_q: Cumulative query sequence lengths
-
-    Returns:
-        Dictionary with 'k1' and 'k2' keys containing CompressionLevelMetadata
-    """
-    return {
-        "k1": _compute_single_compression_metadata(
-            forward_batch=forward_batch,
-            base_metadata=base_metadata,
-            req_to_sparse_token=req_to_sparse_k1_token,
-            kernel_size=k1_kernel_size,
-            kernel_stride=k1_kernel_stride,
-            cu_seqlens_q=cu_seqlens_q,
-        ),
-        "k2": _compute_single_compression_metadata(
-            forward_batch=forward_batch,
-            base_metadata=base_metadata,
-            req_to_sparse_token=req_to_sparse_k2_token,
-            kernel_size=k2_kernel_size,
-            kernel_stride=k2_kernel_stride,
-            cu_seqlens_q=cu_seqlens_q,
-        ),
-    }
+    return tuple(
+        _compute_single_compression_metadata(
+            seq_lens_cpu,
+            token_nums,
+            history_lens,
+            forward_batch.req_pool_indices,
+            req_to_sparse_token,
+            kernel_size,
+            kernel_stride,
+        )
+        for req_to_sparse_token, kernel_size, kernel_stride in (
+            (req_to_sparse_k1_token, k1_kernel_size, k1_kernel_stride),
+            (req_to_sparse_k2_token, k2_kernel_size, k2_kernel_stride),
+        )
+    )
 
 
 def _get_sparse_cache_len(

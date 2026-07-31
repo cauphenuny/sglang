@@ -35,6 +35,24 @@ class _DeviceOffsetsMustNotBeRead:
         raise AssertionError("prefill layers must use scheduler-derived CPU offsets")
 
 
+class _SingleTensorConversion:
+    def __init__(self, values):
+        self.values = values
+        self.first_item_reads = 0
+
+    def __len__(self):
+        return len(self.values)
+
+    def __getitem__(self, index):
+        if index == 0:
+            self.first_item_reads += 1
+            if self.first_item_reads > 2:
+                raise AssertionError("sequence lengths were converted more than once")
+        if index >= len(self.values):
+            raise IndexError
+        return self.values[index]
+
+
 class TestMiniCPMSparseMetadata(CustomTestCase):
     def test_registered_variants_select_adapter_explicitly(self):
         runner = object()
@@ -322,7 +340,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         with patch.object(
             backend_module,
             "_build_k1_k2_compression_metadata",
-            return_value={"k1": level, "k2": level},
+            return_value=(level, level),
         ):
             backend.update_batch_for_sparse(forward_batch, metadata)
 
@@ -474,7 +492,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         with patch.object(
             backend_module,
             "_build_k1_k2_compression_metadata",
-            return_value={"k1": level, "k2": level},
+            return_value=(level, level),
         ):
             backend.update_batch_for_sparse(forward_batch, metadata)
 
@@ -1003,7 +1021,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         # requests are real during this replay.
         forward_batch = SimpleNamespace(
             batch_size=3,
-            seq_lens_cpu=torch.tensor([100, 200, 300], dtype=torch.int32),
+            seq_lens_cpu=_SingleTensorConversion([100, 200, 300]),
             req_pool_indices=torch.tensor([0, 1, 2], dtype=torch.int64),
         )
         base_metadata = SimpleNamespace(
@@ -1012,7 +1030,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         )
         req_to_sparse_token = torch.arange(4 * 32, dtype=torch.int32).reshape(4, 32)
 
-        metadata = sparse_utils._build_k1_k2_compression_metadata(
+        k1, k2 = sparse_utils._build_k1_k2_compression_metadata(
             forward_batch=forward_batch,
             base_metadata=base_metadata,
             req_to_sparse_k1_token=req_to_sparse_token,
@@ -1024,9 +1042,9 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             cu_seqlens_q=base_metadata.cu_seqlens_q,
         )
 
-        self.assertEqual(metadata["k1"].cu_seqlens_cpu, [0, 5, 16, 33])
-        self.assertEqual(metadata["k2"].cu_seqlens_cpu, [0, 0, 2, 5])
-        for level in (metadata["k1"], metadata["k2"]):
+        self.assertEqual(k1.cu_seqlens_cpu, [0, 5, 16, 33])
+        self.assertEqual(k2.cu_seqlens_cpu, [0, 0, 2, 5])
+        for level in (k1, k2):
             self.assertEqual(level.table.shape[0], forward_batch.batch_size)
             self.assertEqual(
                 level.history_compress_token_nums.numel(), forward_batch.batch_size

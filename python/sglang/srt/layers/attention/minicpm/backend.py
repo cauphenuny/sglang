@@ -274,7 +274,7 @@ class MiniCPMSparseBackend(AttentionBackend):
     ):
         cu_seqlens_q = metadata.base.cu_seqlens_q
 
-        compression_metadata = _build_k1_k2_compression_metadata(
+        metadata.k1, metadata.k2 = _build_k1_k2_compression_metadata(
             forward_batch=forward_batch,
             base_metadata=metadata.base,
             req_to_sparse_k1_token=self.req_to_sparse_k1_token,
@@ -285,10 +285,6 @@ class MiniCPMSparseBackend(AttentionBackend):
             k2_kernel_stride=self.k2_kernel_stride,
             cu_seqlens_q=cu_seqlens_q,
         )
-
-        # Map k1/k2 compression metadata objects
-        metadata.k1 = compression_metadata["k1"]
-        metadata.k2 = compression_metadata["k2"]
 
         if forward_batch.forward_mode.is_extend_or_draft_extend_or_mixed():
             _plan_sparse_prefill(
@@ -1073,15 +1069,17 @@ class MiniCPMSparseBackend(AttentionBackend):
             metadata.base.cache_seqlens_int32[:real_bs] - 1
         )
 
-        for name, kernel_stride, req_to_sparse in (
-            ("k1", self.k1_kernel_stride, self.req_to_sparse_k1_token),
-            ("k2", self.k2_kernel_stride, self.req_to_sparse_k2_token),
+        for (name, kernel_stride, req_to_sparse), src in zip(
+            (
+                ("k1", self.k1_kernel_stride, self.req_to_sparse_k1_token),
+                ("k2", self.k2_kernel_stride, self.req_to_sparse_k2_token),
+            ),
+            compression_metadata,
         ):
             self.decode_cuda_graph_metadata[f"compress_{name}"][
                 : real_bs * self.max_context_len // kernel_stride
             ].fill_(float("-inf"))
             dst = getattr(metadata, name)
-            src = compression_metadata[name]
             dst.history_compress_token_nums[:real_bs].copy_(
                 src.history_compress_token_nums
             )
