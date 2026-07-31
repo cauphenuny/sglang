@@ -906,6 +906,15 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         self.assertEqual(key_lengths.tolist(), [20])
         self.assertEqual(key_lengths.dtype, torch.int32)
 
+    def test_token_mappings_use_scheduler_cpu_lengths(self):
+        token_to_bs, token_pos_in_bs = sparse_utils._build_token_mappings(
+            extend_prefix_lens_sparse=[4, 10],
+            seqlen_q_sparse_bs=[2, 3],
+        )
+
+        self.assertEqual(token_to_bs.tolist(), [0, 0, 1, 1, 1])
+        self.assertEqual(token_pos_in_bs.tolist(), [5, 6, 11, 12, 13])
+
 
 if __name__ == "__main__":
     unittest.main()

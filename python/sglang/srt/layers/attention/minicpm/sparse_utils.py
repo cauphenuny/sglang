@@ -230,7 +230,6 @@ def compressed_attention(
     q: torch.Tensor,
     k: torch.Tensor,
     k2: torch.Tensor,
-    kernel_size: int,
     kernel_stride: int,
     block_size: int,
     topk: int,
@@ -254,7 +253,6 @@ def compressed_attention(
         q: Query tensor, shape (total_q_len, num_heads, head_dim)
         k: Compressed key tensor k1, shape (total_k_len, num_heads, head_dim)
         k2: Compressed key tensor k2, shape (total_k_len, num_heads, head_dim)
-        kernel_size: Size of compression kernel
         kernel_stride: Stride of compression kernel
         block_size: Size of attention blocks
         topk: Number of top blocks to select
@@ -320,18 +318,12 @@ def compressed_attention(
 def compressed_attention_tilelang(
     q: torch.Tensor,
     k: torch.Tensor,
-    k2: torch.Tensor,
-    kernel_size: int,
-    kernel_stride: int,
     block_size: int,
     topk: int,
     kernel_topk: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_k: torch.Tensor,
-    cu_seqlens_k2: torch.Tensor,
     max_seqlen_q: int,
-    init_blocks: int = 1,
-    local_blocks: int = 2,
     cache_lens=None,
     fused_kernel=None,
     max_cache_len=-1,
@@ -499,8 +491,7 @@ def _build_sequence_lengths(
 
 
 def _build_token_mappings(
-    cu_seqlens_q_sparse_bs: torch.Tensor,
-    extend_prefix_lens_sparse: torch.Tensor,
+    extend_prefix_lens_sparse: list[int],
     seqlen_q_sparse_bs: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build token mapping tensors for sparse batches.
@@ -509,7 +500,6 @@ def _build_token_mappings(
     token_pos_in_bs (position of each token within its batch).
 
     Args:
-        cu_seqlens_q_sparse_bs: Cumulative sequence lengths for sparse batches
         extend_prefix_lens_sparse: Extension prefix lengths for sparse batches (size: len(sparse_bs_list))
         seqlen_q_sparse_bs: Query sequence lengths for sparse batches
 
@@ -518,29 +508,21 @@ def _build_token_mappings(
         - token_to_bs: Tensor mapping each token to its batch index
         - token_pos_in_bs: Tensor mapping each token to its position within batch
     """
-    # Total number of tokens in sparse batches
-    q_shape_sparse_bs = cu_seqlens_q_sparse_bs[-1].item()
-
-    # Build token_to_bs: which batch each token belongs to
-    token_to_bs = torch.zeros(q_shape_sparse_bs, dtype=torch.int32, device="cpu")
-    for i in range(len(seqlen_q_sparse_bs)):
-        start = cu_seqlens_q_sparse_bs[i]
-        end = cu_seqlens_q_sparse_bs[i + 1]
-        token_to_bs[start:end] = i
-
-    # Build token_pos_in_bs: position of each token within its batch
-    token_pos_in_bs = torch.zeros(q_shape_sparse_bs, dtype=torch.int32, device="cpu")
-    for i in range(len(seqlen_q_sparse_bs)):
-        start = cu_seqlens_q_sparse_bs[i]
-        end = cu_seqlens_q_sparse_bs[i + 1]
-        token_pos_in_bs[start:end] = torch.tensor(
-            [
-                (idx + 1 + extend_prefix_lens_sparse[i].item())
-                for idx in range(seqlen_q_sparse_bs[i])
-            ],
-            dtype=token_pos_in_bs.dtype,
-            device=token_pos_in_bs.device,
+    total_tokens = sum(seqlen_q_sparse_bs)
+    token_to_bs = torch.empty(total_tokens, dtype=torch.int32)
+    token_pos_in_bs = torch.empty(total_tokens, dtype=torch.int32)
+    start = 0
+    for batch_index, (prefix_len, query_len) in enumerate(
+        zip(extend_prefix_lens_sparse, seqlen_q_sparse_bs)
+    ):
+        end = start + query_len
+        token_to_bs[start:end] = batch_index
+        token_pos_in_bs[start:end] = torch.arange(
+            prefix_len + 1,
+            prefix_len + query_len + 1,
+            dtype=torch.int32,
         )
+        start = end
 
     return token_to_bs, token_pos_in_bs
 

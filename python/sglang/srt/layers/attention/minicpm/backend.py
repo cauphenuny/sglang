@@ -313,21 +313,12 @@ class MiniCPMSparseBackend(AttentionBackend):
                 )
             )
 
-            cu_seqlens_q_sparse_bs = torch.tensor(
-                [0] + seqlen_q_sparse_bs, dtype=torch.int32, device=cu_seqlens_q.device
-            ).cumsum(dtype=torch.int32, dim=0)
-
-            extend_prefix_lens_sparse = torch.tensor(
-                [
-                    forward_batch.extend_prefix_lens_cpu[bs]
-                    for bs in metadata.sparse_bs_list
-                ],
-                dtype=torch.long,
-                device="cpu",
-            )
+            extend_prefix_lens_sparse = [
+                forward_batch.extend_prefix_lens_cpu[bs]
+                for bs in metadata.sparse_bs_list
+            ]
 
             metadata.token_to_bs, metadata.token_pos_in_bs = _build_token_mappings(
-                cu_seqlens_q_sparse_bs,
                 extend_prefix_lens_sparse,
                 seqlen_q_sparse_bs,
             )
@@ -381,7 +372,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                     cu_seqlen_q_sparse_tensor * self.heads_per_group
                 )
                 metadata.max_seqlen_q_adjusted = (
-                    seqlen_q_sparse_tensor.max().item() * self.heads_per_group
+                    max(seqlen_q_sparse_bs) * self.heads_per_group
                 )
             else:
                 metadata.cu_seqlens_q_adjusted = (
@@ -663,8 +654,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 forward_batch,
             )
 
-            query_states = query_states.squeeze(0)
-
             ret = self.sparse_get_topk_impl(
                 query_states,
                 metadata.base.cu_seqlens_q,
@@ -715,7 +704,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 query_layer,
                 compressed_k,
                 compressed_k2,
-                self.kernel_size,
                 self.kernel_stride,
                 self.block_size,
                 self.sparse_topk,
@@ -734,18 +722,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             topk_idx = compressed_attention_tilelang(
                 query_layer,
                 compressed_k,
-                compressed_k2,
-                self.kernel_size,
-                self.kernel_stride,
                 self.block_size,
                 self.sparse_topk,
                 self.kernel_topk,
                 cu_seqlens_q,
                 compressed_cu_seqlens,
-                compressed_cu_seqlens2,
                 max_seqlen_in_batch_q,
-                init_blocks=self.init_blocks,
-                local_blocks=self.local_blocks,
                 cache_lens=cache_lens,
                 fused_kernel=fused_kernel,
                 max_cache_len=self.max_context_len,
@@ -980,8 +962,8 @@ class MiniCPMSparseBackend(AttentionBackend):
         q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
 
         topk_idx = self.get_topk_for_sparse(
-            query_states=q_reshaped.unsqueeze(0),
-            key_states=k.unsqueeze(0),
+            query_states=q_reshaped,
+            key_states=k,
             layer=layer,
             forward_batch=forward_batch,
             is_prefill=False,
