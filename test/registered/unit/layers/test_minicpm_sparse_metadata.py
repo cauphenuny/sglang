@@ -63,10 +63,10 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         metadata_type = getattr(sparse_utils, "MiniCPMSparseMetadata")
 
         metadata = metadata_type(base=base_metadata)
-        metadata.sparse_batch_size = 1
+        metadata.sparse_bs_list = [0]
 
-        self.assertEqual(metadata.sparse_batch_size, 1)
-        self.assertFalse(hasattr(base_metadata, "sparse_batch_size"))
+        self.assertEqual(metadata.sparse_bs_list, [0])
+        self.assertFalse(hasattr(base_metadata, "sparse_bs_list"))
 
     def test_head_group_layout_round_trip(self):
         tensor = torch.arange(10).reshape(5, 2, 1)
@@ -335,21 +335,28 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             batch_size=1,
             seq_lens_cpu=torch.tensor([7000], dtype=torch.int32),
             extend_seq_lens_cpu=torch.tensor([2904], dtype=torch.int32),
+            extend_prefix_lens_cpu=[4096],
+        )
+        metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(
+                cu_seqlens_q=torch.tensor([0, 2904], dtype=torch.int32),
+                cache_seqlens_int32=torch.tensor([7000], dtype=torch.int32),
+                page_table=torch.zeros((1, 7000), dtype=torch.int32),
+                max_seq_len_q=2904,
+            )
         )
 
-        metadata = sparse_utils._build_sparse_prefill_metadata(
-            forward_batch=forward_batch,
-            sparse_bs_list=[],
+        sparse_utils._plan_sparse_prefill(
+            forward_batch,
+            metadata,
             head_group_num=2,
+            heads_per_group=16,
             dense_len=8192,
             sparse_topk=96,
             block_size=64,
-            cu_seqlens_q=torch.tensor([0, 2904], dtype=torch.int32),
-            sparse_page_table_dtype=torch.int32,
-            sparse_page_table_device=torch.device("cpu"),
         )
 
-        self.assertEqual(metadata["sparse_page_table"].shape, (2, 7000))
+        self.assertEqual(metadata.sparse_page_table.shape, (2, 7000))
 
     def test_prefill_metadata_builds_layer_invariant_cache_lengths(self):
         """Sparse cache lengths must not be inferred from zero-valued table entries."""
@@ -357,28 +364,77 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             batch_size=2,
             seq_lens_cpu=torch.tensor([200, 64], dtype=torch.int32),
             extend_seq_lens_cpu=[2, 3],
+            extend_prefix_lens_cpu=[198, 61],
+        )
+        metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(
+                cu_seqlens_q=torch.tensor([0, 2, 5], dtype=torch.int32),
+                cache_seqlens_int32=torch.tensor([200, 64], dtype=torch.int32),
+                page_table=torch.zeros((2, 200), dtype=torch.int32),
+                max_seq_len_q=3,
+            )
         )
 
-        metadata = sparse_utils._build_sparse_prefill_metadata(
-            forward_batch=forward_batch,
-            sparse_bs_list=[0],
+        sparse_utils._plan_sparse_prefill(
+            forward_batch,
+            metadata,
             head_group_num=2,
+            heads_per_group=16,
             dense_len=100,
             sparse_topk=2,
             block_size=64,
-            cu_seqlens_q=torch.tensor([0, 2, 5], dtype=torch.int32),
-            sparse_page_table_dtype=torch.int32,
-            sparse_page_table_device=torch.device("cpu"),
         )
 
         self.assertEqual(
-            metadata["sparse_cache_seqlens_int32"].tolist(),
+            metadata.sparse_cache_seqlens_int32.tolist(),
             [71, 71, 72, 72, 64, 64],
         )
         self.assertEqual(
-            metadata["sparse_cu_seqlens_k"].tolist(),
+            metadata.sparse_cu_seqlens_k.tolist(),
             [0, 71, 142, 214, 286, 350, 414],
         )
+
+    def test_prefill_planning_builds_mixed_batch_layout(self):
+        forward_batch = SimpleNamespace(
+            batch_size=2,
+            seq_lens_cpu=torch.tensor([200, 64], dtype=torch.int32),
+            extend_seq_lens_cpu=[2, 3],
+            extend_prefix_lens_cpu=[198, 61],
+        )
+        metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(
+                cu_seqlens_q=torch.tensor([0, 2, 5], dtype=torch.int32),
+                cache_seqlens_int32=torch.tensor([200, 64], dtype=torch.int32),
+                page_table=torch.zeros((2, 200), dtype=torch.int32),
+                max_seq_len_q=3,
+            )
+        )
+
+        sparse_utils._plan_sparse_prefill(
+            forward_batch,
+            metadata,
+            head_group_num=2,
+            heads_per_group=16,
+            dense_len=100,
+            sparse_topk=2,
+            block_size=64,
+        )
+
+        self.assertEqual(metadata.sparse_bs_list, [0])
+        self.assertEqual(metadata.sparse_idx, [0, 1, 2, 3])
+        self.assertEqual(metadata.dense_layout, [(1, 4, 4, 3)])
+        self.assertEqual(metadata.token_to_bs.tolist(), [0, 0])
+        self.assertEqual(metadata.token_pos_in_bs.tolist(), [199, 200])
+        self.assertEqual(
+            metadata.sparse_cu_seqlens_q.tolist(),
+            [0, 1, 2, 3, 4, 7, 10],
+        )
+        self.assertEqual(
+            metadata.sparse_cache_seqlens_int32.tolist(),
+            [71, 71, 72, 72, 64, 64],
+        )
+        self.assertEqual(metadata.topk_cu_seqlens_q.tolist(), [0, 2])
+        self.assertEqual(metadata.topk_cu_seqlens_k.tolist(), [0, 200])
 
     def test_mixed_prefill_compacts_stage1_cache_lengths(self):
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
@@ -409,7 +465,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             base=SimpleNamespace(
                 cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32),
                 cache_seqlens_int32=torch.tensor([50, 200], dtype=torch.int32),
-                page_table=torch.zeros((2, 200), dtype=torch.int32),
+                page_table=torch.arange(1, 401, dtype=torch.int32).reshape(2, 200),
                 max_seq_len_q=1,
             )
         )
@@ -424,6 +480,10 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
 
         self.assertEqual(metadata.sparse_bs_list, [1])
         self.assertEqual(metadata.cache_seqlens_int32_stage1.tolist(), [199])
+        self.assertEqual(
+            metadata.sparse_page_table[0, :50].tolist(),
+            metadata.base.page_table[0, :50].tolist(),
+        )
 
     def test_dense_decode_page_table_covers_dense_threshold(self):
         """Dense decode must reserve page-table coverage through the dense threshold."""
@@ -467,15 +527,13 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             base=SimpleNamespace(
                 page_table=torch.tensor([[10, 0], [20, 21]], dtype=torch.int32),
             ),
-            sparse_batch_size=1,
             sparse_bs_list=[1],
             sparse_idx=[1],
-            sparse_page_table=torch.zeros((2, 2), dtype=torch.int32),
+            dense_layout=[(0, 0, 0, 1)],
+            sparse_page_table=torch.tensor([[10, 0], [0, 0]], dtype=torch.int32),
             token_to_bs=torch.tensor([0], dtype=torch.int32),
             token_pos_in_bs=torch.tensor([2], dtype=torch.int32),
             seqlen_k_sparse_bs_tensor=torch.tensor([2], dtype=torch.int32),
-            old_bs_to_new_bs_range=[0, 1, 2],
-            sparse_cu_seqlens_q_cpu=[0, 1, 2],
         )
         backend.head_group_num = 1
         backend.heads_per_group = 1
@@ -884,7 +942,6 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         """A mixed batch must compile fused top-k for its sparse sub-batch only."""
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
         backend.forward_metadata = SimpleNamespace(
-            sparse_batch_size=1,
             sparse_bs_list=[1],
             base=SimpleNamespace(
                 cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32),
@@ -976,27 +1033,6 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             )
             self.assertEqual(level.cu_new_token_nums.numel(), 4)
             self.assertEqual(level.cu_total_compress_token_nums.numel(), 4)
-
-    def test_sparse_sequence_lengths_use_scheduler_values(self):
-        """Sparse query lengths must not be copied back from device offsets."""
-        query_lengths, key_lengths = sparse_utils._build_sequence_lengths(
-            extend_seq_lens_cpu=[3, 5],
-            seq_lens=torch.tensor([10, 20], dtype=torch.int64),
-            sparse_bs_list=[1],
-        )
-
-        self.assertEqual(query_lengths, [5])
-        self.assertEqual(key_lengths.tolist(), [20])
-        self.assertEqual(key_lengths.dtype, torch.int32)
-
-    def test_token_mappings_use_scheduler_cpu_lengths(self):
-        token_to_bs, token_pos_in_bs = sparse_utils._build_token_mappings(
-            extend_prefix_lens_sparse=[4, 10],
-            seqlen_q_sparse_bs=[2, 3],
-        )
-
-        self.assertEqual(token_to_bs.tolist(), [0, 0, 1, 1, 1])
-        self.assertEqual(token_pos_in_bs.tolist(), [5, 6, 11, 12, 13])
 
 
 if __name__ == "__main__":

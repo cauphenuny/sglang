@@ -456,18 +456,16 @@ class MiniCPMSparseMetadata(msgspec.Struct):
     k1: Optional[CompressionLevelMetadata] = None
     k2: Optional[CompressionLevelMetadata] = None
     sparse_bs_list: Optional[list[int]] = None
-    sparse_batch_size: int = 0
     sparse_idx: Optional[list[int]] = None
+    dense_layout: Optional[list[tuple[int, int, int, int]]] = None
     seqlen_k_sparse_bs_tensor: Optional[torch.Tensor] = None
     token_to_bs: Optional[torch.Tensor] = None
     token_pos_in_bs: Optional[torch.Tensor] = None
     sparse_page_table: Optional[torch.Tensor] = None
     sparse_cache_seqlens_int32: Optional[torch.Tensor] = None
-    sparse_cu_seqlens_q_cpu: Optional[torch.Tensor] = None
     sparse_cu_seqlens_q: Optional[torch.Tensor] = None
     sparse_cu_seqlens_k: Optional[torch.Tensor] = None
     sparse_max_seq_len_q: int = 1
-    old_bs_to_new_bs_range: Optional[list[int]] = None
     cache_seqlens_int32_stage1: Optional[torch.Tensor] = None
     cu_seqlens_q_adjusted: Optional[torch.Tensor] = None
     max_seqlen_q_adjusted: int = 1
@@ -475,54 +473,6 @@ class MiniCPMSparseMetadata(msgspec.Struct):
     topk_cu_seqlens_k: Optional[torch.Tensor] = None
     topk_max_seqlen_q: int = 1
     topk_max_seqlen_k: int = 1
-
-
-def _build_sequence_lengths(
-    extend_seq_lens_cpu: list[int],
-    seq_lens: torch.Tensor,
-    sparse_bs_list: list[int],
-) -> tuple[list[int], torch.Tensor]:
-    return (
-        [extend_seq_lens_cpu[index] for index in sparse_bs_list],
-        seq_lens[sparse_bs_list].to(dtype=torch.int32),
-    )
-
-
-def _build_token_mappings(
-    extend_prefix_lens_sparse: list[int],
-    seqlen_q_sparse_bs: list[int],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build token mapping tensors for sparse batches.
-
-    Computes token_to_bs (which batch each token belongs to) and
-    token_pos_in_bs (position of each token within its batch).
-
-    Args:
-        extend_prefix_lens_sparse: Extension prefix lengths for sparse batches (size: len(sparse_bs_list))
-        seqlen_q_sparse_bs: Query sequence lengths for sparse batches
-
-    Returns:
-        Tuple of (token_to_bs, token_pos_in_bs)
-        - token_to_bs: Tensor mapping each token to its batch index
-        - token_pos_in_bs: Tensor mapping each token to its position within batch
-    """
-    total_tokens = sum(seqlen_q_sparse_bs)
-    token_to_bs = torch.empty(total_tokens, dtype=torch.int32)
-    token_pos_in_bs = torch.empty(total_tokens, dtype=torch.int32)
-    start = 0
-    for batch_index, (prefix_len, query_len) in enumerate(
-        zip(extend_prefix_lens_sparse, seqlen_q_sparse_bs)
-    ):
-        end = start + query_len
-        token_to_bs[start:end] = batch_index
-        token_pos_in_bs[start:end] = torch.arange(
-            prefix_len + 1,
-            prefix_len + query_len + 1,
-            dtype=torch.int32,
-        )
-        start = end
-
-    return token_to_bs, token_pos_in_bs
 
 
 def _compute_single_compression_metadata(
@@ -673,97 +623,45 @@ def _get_sparse_cache_len(
     )
 
 
-def _build_sparse_prefill_metadata(
+def _plan_sparse_prefill(
     forward_batch: ForwardBatch,
-    sparse_bs_list: list[int],
+    metadata: MiniCPMSparseMetadata,
     head_group_num: int,
+    heads_per_group: int,
     dense_len: int,
     sparse_topk: int,
     block_size: int,
-    cu_seqlens_q: torch.Tensor,
-    sparse_page_table_dtype: torch.dtype,
-    sparse_page_table_device: torch.device,
-) -> dict:
-    """Build sparse prefill metadata.
-
-    This method handles the complex page table and batch mapping logic
-    for sparse prefill mode.
-
-    Args:
-        forward_batch: The forward batch to analyze
-        sparse_bs_list: List of sparse batch indices
-        head_group_num: Number of head groups
-        dense_len: Dense length threshold for sparse activation
-        sparse_topk: Top-K value for sparse attention
-        block_size: Block size for sparse attention
-        cu_seqlens_q: Cumulative query sequence lengths
-        sparse_page_table_dtype: Data type for sparse page table
-        sparse_page_table_device: Device for sparse page table
-
-    Returns:
-        Dictionary with prefill metadata
-    """
-    bs = forward_batch.batch_size
-
-    max_sparse_cache_len = -1
-    sparse_page_table_bs = 0
-    old_bs_to_new_bs_range = [0 for _ in range(bs + 1)]
-    sparse_max_seq_len_q = 1
-
-    for i in range(bs):
-        if forward_batch.seq_lens_cpu[i] >= dense_len:
-            max_sparse_cache_len = max(max_sparse_cache_len, sparse_topk * block_size)
-            sparse_page_table_bs += (
-                forward_batch.extend_seq_lens_cpu[i] * head_group_num
-            )
-            old_bs_to_new_bs_range[i + 1] = (
-                old_bs_to_new_bs_range[i]
-                + head_group_num * forward_batch.extend_seq_lens_cpu[i]
-            )
-        else:
-            max_sparse_cache_len = max(
-                max_sparse_cache_len, forward_batch.seq_lens_cpu[i]
-            )
-            sparse_page_table_bs += head_group_num
-            old_bs_to_new_bs_range[i + 1] = old_bs_to_new_bs_range[i] + head_group_num
-            sparse_max_seq_len_q = max(
-                sparse_max_seq_len_q, forward_batch.extend_seq_lens_cpu[i]
-            )
-
-    sparse_page_table = torch.zeros(
-        (sparse_page_table_bs, max_sparse_cache_len),
-        dtype=sparse_page_table_dtype,
-        device=sparse_page_table_device,
-    )
-    sparse_cu_seqlens_q_cpu = torch.zeros(
-        (sparse_page_table_bs + 1), dtype=cu_seqlens_q.dtype, device="cpu"
-    )
-
-    pt = 0
-    for i in range(bs):
-        if forward_batch.seq_lens_cpu[i] >= dense_len:
-            for _ in range(forward_batch.extend_seq_lens_cpu[i] * head_group_num):
-                sparse_cu_seqlens_q_cpu[pt + 1] = sparse_cu_seqlens_q_cpu[pt] + 1
-                pt += 1
-        else:
-            for _ in range(head_group_num):
-                sparse_cu_seqlens_q_cpu[pt + 1] = (
-                    sparse_cu_seqlens_q_cpu[pt] + forward_batch.extend_seq_lens_cpu[i]
-                )
-                pt += 1
-
-    assert (
-        pt == sparse_page_table_bs
-    ), f"sparse_page_table_bs {sparse_page_table_bs} vs pt {pt}"
-
-    sparse_cu_seqlens_q = sparse_cu_seqlens_q_cpu.to(device=cu_seqlens_q.device)
-    sparse_cache_seqlens = []
+) -> None:
+    device = metadata.base.cu_seqlens_q.device
     sparse_capacity = sparse_topk * block_size
-    for i in range(bs):
-        seq_len = int(forward_batch.seq_lens_cpu[i])
+    sparse_bs_list = []
+    sparse_idx = []
+    dense_layout = []
+    row_q_lens = []
+    sparse_cache_seqlens = []
+    token_to_bs = []
+    token_pos_in_bs = []
+    sparse_q_lens = []
+    sparse_k_lens = []
+    dense_q_lens = []
+    max_sparse_cache_len = 0
+    query_group_start = 0
+
+    for batch_idx in range(forward_batch.batch_size):
+        seq_len = int(forward_batch.seq_lens_cpu[batch_idx])
+        query_len = int(forward_batch.extend_seq_lens_cpu[batch_idx])
+        prefix_len = int(forward_batch.extend_prefix_lens_cpu[batch_idx])
+        row_start = len(row_q_lens)
         if seq_len >= dense_len:
-            prefix_len = seq_len - forward_batch.extend_seq_lens_cpu[i]
-            for token_offset in range(1, forward_batch.extend_seq_lens_cpu[i] + 1):
+            sparse_batch_idx = len(sparse_bs_list)
+            sparse_bs_list.append(batch_idx)
+            sparse_q_lens.append(query_len)
+            sparse_k_lens.append(seq_len)
+            sparse_idx.extend(range(row_start, row_start + query_len * head_group_num))
+            row_q_lens.extend([1] * (query_len * head_group_num))
+            token_to_bs.extend([sparse_batch_idx] * query_len)
+            token_pos_in_bs.extend(range(prefix_len + 1, prefix_len + query_len + 1))
+            for token_offset in range(1, query_len + 1):
                 sparse_cache_seqlens.extend(
                     [
                         _get_sparse_cache_len(
@@ -774,38 +672,68 @@ def _build_sparse_prefill_metadata(
                     ]
                     * head_group_num
                 )
+            max_sparse_cache_len = max(max_sparse_cache_len, sparse_capacity)
         else:
+            dense_layout.append((batch_idx, row_start, query_group_start, query_len))
+            dense_q_lens.append(query_len)
+            row_q_lens.extend([query_len] * head_group_num)
             sparse_cache_seqlens.extend([seq_len] * head_group_num)
+            max_sparse_cache_len = max(max_sparse_cache_len, seq_len)
+        query_group_start += query_len * head_group_num
 
-    sparse_cache_seqlens_int32 = torch.tensor(
+    metadata.sparse_bs_list = sparse_bs_list
+    metadata.sparse_idx = sparse_idx
+    metadata.dense_layout = dense_layout
+    metadata.token_to_bs = torch.tensor(token_to_bs, dtype=torch.int32, device=device)
+    metadata.token_pos_in_bs = torch.tensor(
+        token_pos_in_bs, dtype=torch.int32, device=device
+    )
+    metadata.seqlen_k_sparse_bs_tensor = torch.tensor(
+        sparse_k_lens, dtype=torch.int32, device=device
+    )
+    metadata.sparse_page_table = torch.zeros(
+        (len(row_q_lens), max_sparse_cache_len),
+        dtype=metadata.base.page_table.dtype,
+        device=metadata.base.page_table.device,
+    )
+    row_q_lens_tensor = torch.tensor(
+        row_q_lens, dtype=metadata.base.cu_seqlens_q.dtype, device=device
+    )
+    metadata.sparse_cu_seqlens_q = F.pad(
+        torch.cumsum(row_q_lens_tensor, dim=0, dtype=torch.int32), (1, 0)
+    )
+    metadata.sparse_max_seq_len_q = max(dense_q_lens, default=1)
+    metadata.sparse_cache_seqlens_int32 = torch.tensor(
         sparse_cache_seqlens,
         dtype=torch.int32,
-        device=cu_seqlens_q.device,
+        device=device,
     )
-    sparse_cu_seqlens_k = F.pad(
-        torch.cumsum(sparse_cache_seqlens_int32, dim=0, dtype=torch.int32),
+    metadata.sparse_cu_seqlens_k = F.pad(
+        torch.cumsum(metadata.sparse_cache_seqlens_int32, dim=0, dtype=torch.int32),
         (1, 0),
     )
+    metadata.cache_seqlens_int32_stage1 = (
+        metadata.base.cache_seqlens_int32[sparse_bs_list] - 1
+    )
 
-    sparse_idx = []
-    for sparse_bs in sparse_bs_list:
-        sparse_idx.extend(
-            range(
-                old_bs_to_new_bs_range[sparse_bs],
-                old_bs_to_new_bs_range[sparse_bs + 1],
-            )
+    if sparse_bs_list:
+        sparse_q_lens_tensor = torch.tensor(
+            sparse_q_lens, dtype=torch.int32, device=device
         )
-
-    return {
-        "sparse_page_table": sparse_page_table,
-        "sparse_cu_seqlens_q_cpu": sparse_cu_seqlens_q_cpu,
-        "sparse_cu_seqlens_q": sparse_cu_seqlens_q,
-        "old_bs_to_new_bs_range": old_bs_to_new_bs_range,
-        "sparse_max_seq_len_q": sparse_max_seq_len_q,
-        "sparse_idx": sparse_idx,
-        "sparse_cache_seqlens_int32": sparse_cache_seqlens_int32,
-        "sparse_cu_seqlens_k": sparse_cu_seqlens_k,
-    }
+        metadata.topk_cu_seqlens_q = F.pad(
+            torch.cumsum(sparse_q_lens_tensor, dim=0, dtype=torch.int32), (1, 0)
+        )
+        metadata.topk_cu_seqlens_k = F.pad(
+            torch.cumsum(metadata.seqlen_k_sparse_bs_tensor, dim=0, dtype=torch.int32),
+            (1, 0),
+        )
+        metadata.topk_max_seqlen_q = max(sparse_q_lens)
+        metadata.topk_max_seqlen_k = max(sparse_k_lens)
+        metadata.cu_seqlens_q_adjusted = metadata.topk_cu_seqlens_q * heads_per_group
+        metadata.max_seqlen_q_adjusted = metadata.topk_max_seqlen_q * heads_per_group
+    else:
+        metadata.cu_seqlens_q_adjusted = metadata.base.cu_seqlens_q * heads_per_group
+        metadata.max_seqlen_q_adjusted = metadata.base.max_seq_len_q * heads_per_group
 
 
 def _build_sparse_decode_metadata(
