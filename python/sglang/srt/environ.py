@@ -735,7 +735,6 @@ class Envs:
 
     # MiniCPM sparse attention developer switches
     SGLANG_MINICPM_FUSE_TOPK = EnvBool(False)
-    SGLANG_MINICPM_SPLIT_STAGE1 = EnvBool(False)
     SGLANG_MINICPM_DENSE_AS_SPARSE = EnvBool(False)
     SGLANG_MINICPM_FORCE_DENSE = EnvBool(False)
 

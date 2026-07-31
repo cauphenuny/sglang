@@ -589,16 +589,14 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                 k1_kernel_stride=3,
                 k2_kernel_size=13,
                 k2_kernel_stride=7,
-                padded=True,
             )
 
         self.assertEqual(
             [(call.args[8], call.args[9]) for call in compress.call_args_list],
             [(5, 3), (13, 7)],
         )
-        self.assertTrue(all(call.kwargs["padded"] for call in compress.call_args_list))
 
-    def test_decode_compression_has_one_kernel_call_per_buffer_source(self):
+    def test_decode_compression_uses_compact_layout(self):
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
         backend.forward_metadata = SimpleNamespace()
         backend.max_context_len = 8
@@ -606,7 +604,6 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend.k1_kernel_stride = 2
         backend.k2_kernel_size = 4
         backend.k2_kernel_stride = 4
-        backend.minicpm_split_stage1 = True
         backend.device = torch.device("cpu")
         layer = SimpleNamespace(tp_k_head_num=1, head_dim=2)
         forward_batch = SimpleNamespace(batch_size=2)
@@ -628,7 +625,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                 self.assertEqual(k1.shape, (8, 1, 2))
                 self.assertEqual(k2.shape, (4, 1, 2))
                 compress.assert_called_once()
-                self.assertTrue(compress.call_args.kwargs["padded"])
+                self.assertNotIn("padded", compress.call_args.kwargs)
 
     def test_fused_topk_kernels_compile_lazily_per_batch_size(self):
         """Startup must not compile fused kernels for batch sizes that never run."""
@@ -745,7 +742,6 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend.k2_kernel_stride = 1
         backend.dense_len = 1
         backend.max_context_len = 1
-        backend.minicpm_split_stage1 = True
         layer = SimpleNamespace(tp_q_head_num=1, tp_k_head_num=1, head_dim=1)
         forward_batch = SimpleNamespace(batch_size=2)
 
@@ -789,7 +785,6 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
 
         self.assertEqual(result, "sparse-kernel")
         get_kernel.assert_called_once_with(1, is_prefill=True)
-        self.assertFalse(allocate.call_args.kwargs["minicpm_split_stage1"])
 
     def test_compression_metadata_ignores_cuda_graph_padding(self):
         """CUDA graph padding rows must not alter offsets for real requests."""

@@ -176,7 +176,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 "MiniCPM fused top-k currently requires 16 query heads per KV head, "
                 f"got {self.heads_per_group}."
             )
-        self.minicpm_split_stage1 = envs.SGLANG_MINICPM_SPLIT_STAGE1.get()
         dtype_str = str(self.model_dtype).removeprefix("torch.")
         if self.minicpm_fuse_topk and dtype_str not in ("bfloat16", "float16"):
             raise ValueError(
@@ -488,7 +487,6 @@ class MiniCPMSparseBackend(AttentionBackend):
             k1_kernel_stride=self.k1_kernel_stride,
             k2_kernel_size=self.k2_kernel_size,
             k2_kernel_stride=self.k2_kernel_stride,
-            padded=self.minicpm_split_stage1,
         )
         return compressed_k, compressed_k2
 
@@ -570,7 +568,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 dtype=key_states.dtype,
                 device=key_states.device,
                 max_context_length=self.max_context_len,
-                minicpm_split_stage1=False,
             )
 
             pt_k1, pt_k2 = 0, 0
@@ -718,7 +715,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 cache_lens=cache_lens,
                 cu_seqlens_q_adjusted=self.forward_metadata.cu_seqlens_q_adjusted,
                 max_seqlen_q_adjusted=self.forward_metadata.max_seqlen_q_adjusted,
-                minicpm_split_stage1=self.minicpm_split_stage1,
             )
         else:
             topk_idx = compressed_attention_tilelang(
@@ -836,7 +832,6 @@ class MiniCPMSparseBackend(AttentionBackend):
                 dtype=k.dtype,
                 device=k.device,
                 max_context_length=self.max_context_len,
-                minicpm_split_stage1=False,
             )
 
         dense_layout_spans = []

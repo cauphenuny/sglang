@@ -6,7 +6,6 @@ combining both backend-agnostic sparse attention components and kernel utilities
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Optional
 
 import msgspec
@@ -60,7 +59,6 @@ def compress_k_core_new(
     kernel_size,
     kernel_stride,
     max_context_length,
-    padded=False,
 ):
     head_num_k = key_cache.shape[1]
     head_dim = key_cache.shape[2]
@@ -72,11 +70,7 @@ def compress_k_core_new(
     # Use provided explicit parameters for buffer allocation
     # max_chunks_per_seq is already the maximum possible chunks for any sequence
     # given max_context_length, kernel_size, and kernel_stride
-    max_chunks_per_seq = (
-        max_context_length // kernel_stride
-        if padded
-        else max(0, (max_context_length - kernel_size) // kernel_stride + 1)
-    )
+    max_chunks_per_seq = max(0, (max_context_length - kernel_size) // kernel_stride + 1)
 
     # ==============================================================================
     # Launch kernel for ALL chunks (history + new)
@@ -117,7 +111,6 @@ def compress_k_core_new(
         kernel_stride,
         BLOCK_SIZE,
         max_grid_chunks,  # Pass the limit to kernel for loop control
-        PADDED=padded,
     )
 
     return
@@ -134,7 +127,6 @@ def get_compress_k_v2(
     k1_kernel_stride,
     k2_kernel_size,
     k2_kernel_stride,
-    padded=False,
 ):
     batch = len(forward_batch.req_pool_indices)
     key_cache = get_token_to_kv_pool().get_key_buffer(layer.layer_id)
@@ -166,7 +158,6 @@ def get_compress_k_v2(
             kernel_size,
             kernel_stride,
             max_context_length,
-            padded=padded,
         )
 
 
@@ -183,7 +174,6 @@ def allocate_and_compress_keys(
     dtype: torch.dtype = torch.bfloat16,
     device: torch.device = None,
     max_context_length: int = 32768,
-    minicpm_split_stage1: bool = False,
 ):
     """Allocate compressed key tensors and run compression.
 
@@ -200,7 +190,6 @@ def allocate_and_compress_keys(
         dtype: Tensor data type (default: bfloat16)
         device: Tensor device (default: layer device)
         max_context_length: Maximum context length for the model (default: 32768)
-        minicpm_split_stage1: If True, use padded kernel
 
     Returns:
         Tuple of (full_compressed_k1, full_compressed_k2)
@@ -232,7 +221,6 @@ def allocate_and_compress_keys(
         k1_kernel_stride=k1_kernel_stride,
         k2_kernel_size=k2_kernel_size,
         k2_kernel_stride=k2_kernel_stride,
-        padded=minicpm_split_stage1,
     )
 
     return full_compressed_k1, full_compressed_k2
@@ -256,7 +244,6 @@ def compressed_attention(
     cache_lens: Optional[torch.Tensor] = None,
     cu_seqlens_q_adjusted: Optional[torch.Tensor] = None,
     max_seqlen_q_adjusted: Optional[int] = None,
-    minicpm_split_stage1: bool = False,
 ) -> torch.Tensor:
     """Compressed attention computation for sparse attention.
 
@@ -299,47 +286,17 @@ def compressed_attention(
             if cache_lens is None:
                 cache_lens = torch.zeros(batch_size, dtype=torch.int32, device=q.device)
 
-        if not is_prefilling and minicpm_split_stage1:
-            batch_size = q.shape[0]
-            k1_len = k.shape[0]
-            q_head = q.shape[1]
-            kv_head = k.shape[1]
-            group_size = q_head // kv_head
-            head_dim = k.shape[2]
-            q_reshape = (
-                q.reshape(batch_size, 1, q_head, head_dim)
-                .transpose(1, 2)
-                .reshape(batch_size, kv_head, group_size, head_dim)
-                .transpose(0, 1)
-                .reshape(-1, group_size, head_dim)
-            )
-            k_reshape = (
-                k.reshape(batch_size, k1_len // batch_size, kv_head, head_dim)
-                .transpose(1, 2)
-                .transpose(-2, -1)
-                .transpose(0, 1)
-                .reshape(-1, head_dim, k1_len // batch_size)
-            )
-
-            scale = 1.0 / math.sqrt(head_dim)
-            score = torch.bmm(q_reshape, k_reshape).mul_(scale)
-            torch.nan_to_num(score, nan=float("-inf"), posinf=float("-inf"), out=score)
-            torch.softmax(score, dim=-1, out=score)
-            score = score.reshape(
-                kv_head, batch_size, group_size, k1_len // batch_size
-            ).sum(dim=2)
-        else:
-            score = infllmv2_attn_stage1(
-                q.contiguous(),
-                k.contiguous(),
-                k2.contiguous(),
-                cu_seqlens_q=cu_seqlens_q_adjusted,
-                cu_seqlens_k=cu_seqlens_k,
-                cu_seqlens_v=cu_seqlens_k2,
-                max_seqlen_q=max_seqlen_q_adjusted,
-                max_seqlen_k=max_context_len // kernel_stride,
-                causal=is_prefilling,
-            )
+        score = infllmv2_attn_stage1(
+            q.contiguous(),
+            k.contiguous(),
+            k2.contiguous(),
+            cu_seqlens_q=cu_seqlens_q_adjusted,
+            cu_seqlens_k=cu_seqlens_k,
+            cu_seqlens_v=cu_seqlens_k2,
+            max_seqlen_q=max_seqlen_q_adjusted,
+            max_seqlen_k=max_context_len // kernel_stride,
+            causal=is_prefilling,
+        )
 
         block_score = max_pooling_1d_varlen(
             score.contiguous(),

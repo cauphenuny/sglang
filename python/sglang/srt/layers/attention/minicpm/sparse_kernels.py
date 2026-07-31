@@ -22,7 +22,6 @@ def compress_k_complete_kernel_new(
     kernel_stride: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     max_grid_chunks: tl.constexpr,
-    PADDED: tl.constexpr,
 ):
     """
     Single-kernel implementation that fuses k computation, key compression,
@@ -65,10 +64,7 @@ def compress_k_complete_kernel_new(
     history_chunks_in_seq = history_compress
     total_chunks_in_seq = history_chunks_in_seq + new_chunks_in_seq
 
-    if PADDED:
-        output_start = batch_idx * max_chunks_per_seq
-    else:
-        output_start = tl.load(cu_total_compress_k_token_nums_ptr + batch_idx)
+    output_start = tl.load(cu_total_compress_k_token_nums_ptr + batch_idx)
 
     # ====================================================================
     # LOOP: Handle multiple chunks per thread block if needed
