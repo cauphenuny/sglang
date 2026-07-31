@@ -29,10 +29,7 @@ if TYPE_CHECKING:
 import tilelang
 import tilelang.math
 
-from sglang.kernels.jit.minicpm_sala import (
-    get_block_table_v2,
-    get_block_table_v3,
-)
+from sglang.kernels.jit.minicpm_sala import get_block_table
 from sglang.srt.layers.attention.minicpm.fuse_kernel import (
     fused_attn_pooling_online_topk_decode,
     fused_attn_pooling_online_topk_prefill,
@@ -797,7 +794,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 forward_batch=forward_batch,
             )
 
-            sparse_page_table_sparse_bs = get_block_table_v2(
+            sparse_page_table_sparse_bs = get_block_table(
                 topk_idx,
                 page_table[metadata.sparse_bs_list],
                 metadata.token_to_bs,
@@ -805,6 +802,7 @@ class MiniCPMSparseBackend(AttentionBackend):
                 metadata.seqlen_k_sparse_bs_tensor,
                 head_group_num=self.head_group_num,
                 block_size=self.block_size,
+                elementwise=False,
             ).reshape(-1, self.num_sparse_topk_tokens)
 
             # copy page table for sparse bs
@@ -968,7 +966,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             forward_batch=forward_batch,
             is_prefill=False,
         )
-        sparse_page_table = get_block_table_v3(
+        sparse_page_table = get_block_table(
             topk_idx,
             page_table,
             metadata.token_to_bs,
@@ -976,6 +974,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             cache_seqlens,
             head_group_num=self.head_group_num,
             block_size=self.block_size,
+            elementwise=True,
         ).reshape(-1, self.num_sparse_topk_tokens)
         sparse_rows = self.head_group_num * bs
         metadata.sparse_page_table[:sparse_rows, : self.num_sparse_topk_tokens] = (

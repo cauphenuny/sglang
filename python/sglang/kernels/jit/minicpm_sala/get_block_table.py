@@ -26,29 +26,36 @@ def _jit_get_block_table_module(
     """
     args = make_cpp_args(topk, head_group_num, block_size)
     wrappers = [
-        ("get_block_table_v2", f"minicpm_sala::get_block_table<2, {args}>"),
+        (
+            "get_block_table_blockwise",
+            f"minicpm_sala::get_block_table<false, {args}>",
+        ),
     ]
     if block_size == 64 and topk % 16 == 0:
         wrappers.append(
-            ("get_block_table_v3", f"minicpm_sala::get_block_table<3, {args}>")
+            (
+                "get_block_table_elementwise",
+                f"minicpm_sala::get_block_table<true, {args}>",
+            )
         )
     return load_jit(
-        f"get_block_table_topk{topk}_g{head_group_num}_b{block_size}",
+        f"get_block_table_strategies_topk{topk}_g{head_group_num}_b{block_size}",
         *args,
         cuda_files=["minicpm_sala/get_block_table.cuh"],
         cuda_wrappers=wrappers,
     )
 
 
-def _run(
-    version: int,
+def get_block_table(
     topk_idx: torch.Tensor,
     block_table: torch.Tensor,
     token_to_bs: torch.Tensor,
     token_pos_in_bs: torch.Tensor,
     seqlen_q: torch.Tensor,
-    head_group_num: int,
-    block_size: int,
+    head_group_num: int = 2,
+    block_size: int = 64,
+    *,
+    elementwise: bool,
 ) -> torch.Tensor:
     if topk_idx.dim() != 3:
         raise RuntimeError(
@@ -60,8 +67,11 @@ def _run(
         raise RuntimeError(
             f"topk and block_size must be positive, got {topk=} and {block_size=}"
         )
-    if version == 3 and (block_size != 64 or topk % 16):
-        version = 2
+    kernel_name = (
+        "get_block_table_elementwise"
+        if elementwise and block_size == 64 and topk % 16 == 0
+        else "get_block_table_blockwise"
+    )
 
     out = torch.zeros(
         (token_num, head_group_num, topk * block_size),
@@ -69,51 +79,7 @@ def _run(
         device=topk_idx.device,
     )
     module = _jit_get_block_table_module(topk, head_group_num, block_size)
-    getattr(module, f"get_block_table_v{version}")(
+    getattr(module, kernel_name)(
         out, topk_idx, block_table, token_to_bs, token_pos_in_bs, seqlen_q
     )
     return out
-
-
-def get_block_table_v2(
-    topk_idx: torch.Tensor,
-    block_table: torch.Tensor,
-    token_to_bs: torch.Tensor,
-    token_pos_in_bs: torch.Tensor,
-    seqlen_q: torch.Tensor,
-    head_group_num: int = 2,
-    block_size: int = 64,
-) -> torch.Tensor:
-    """Build the sparse block table (1 thread per (token, head, topk) entry)."""
-    return _run(
-        2,
-        topk_idx,
-        block_table,
-        token_to_bs,
-        token_pos_in_bs,
-        seqlen_q,
-        head_group_num,
-        block_size,
-    )
-
-
-def get_block_table_v3(
-    topk_idx: torch.Tensor,
-    block_table: torch.Tensor,
-    token_to_bs: torch.Tensor,
-    token_pos_in_bs: torch.Tensor,
-    seqlen_q: torch.Tensor,
-    head_group_num: int = 2,
-    block_size: int = 64,
-) -> torch.Tensor:
-    """Build the sparse block table with the optimized decode layout when supported."""
-    return _run(
-        3,
-        topk_idx,
-        block_table,
-        token_to_bs,
-        token_pos_in_bs,
-        seqlen_q,
-        head_group_num,
-        block_size,
-    )

@@ -33,7 +33,7 @@ constexpr int kTopkPerBlock = 16;
 // This allows topk_idx to be read once and all corresponding
 // out_block_table elements calculated, reducing memory access.
 template <int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
-__global__ void get_block_table_cuda_v2(
+__global__ void get_block_table_cuda_blockwise(
     const int* topk_idx,
     const int* block_table,
     const int* token_to_bs,
@@ -69,10 +69,10 @@ __global__ void get_block_table_cuda_v2(
   }
 }
 
-// opt for decode: 1 thread calc 1 element of out_block_table, block size 1024,
-// smem 1024 / 64 = 16.
+// 1 thread calculates 1 element of out_block_table. A 1024-thread block
+// expands 16 selected blocks in parallel when kSparseBlockSize is 64.
 template <int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
-__global__ void get_block_table_cuda_v3(
+__global__ void get_block_table_cuda_elementwise(
     const int* topk_idx,
     const int* block_table,
     const int* token_to_bs,
@@ -169,7 +169,7 @@ void verify_inputs(
 
 }  // namespace
 
-template <int kVersion, int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
+template <bool kElementwise, int kSparseTopK, int kHeadGroup, int kSparseBlockSize>
 void get_block_table(
     tvm::ffi::TensorView out,
     tvm::ffi::TensorView topk_idx,
@@ -177,7 +177,6 @@ void get_block_table(
     tvm::ffi::TensorView token_to_bs,
     tvm::ffi::TensorView token_pos_in_bs,
     tvm::ffi::TensorView seqlen_q) {
-  static_assert(kVersion == 2 || kVersion == 3);
   using namespace host;
   SymbolicSize token_num{"token_num"}, batch_size{"batch_size"}, seqlen_q_max{"seqlen_q_max"};
   SymbolicDevice device;
@@ -190,13 +189,13 @@ void get_block_table(
   const DLDevice dev = device.unwrap();
 
   constexpr int kThreadsPerBlock = 1024;
-  constexpr int kElementsPerEntry = kVersion == 2 ? 1 : kSparseBlockSize;
+  constexpr int kElementsPerEntry = kElementwise ? kSparseBlockSize : 1;
   const int64_t total = static_cast<int64_t>(n_token) * kHeadGroup * kSparseTopK * kElementsPerEntry;
   const int64_t num_blocks = (total + kThreadsPerBlock - 1) / kThreadsPerBlock;
 
-  if constexpr (kVersion == 2) {
+  if constexpr (!kElementwise) {
     LaunchKernel(num_blocks, kThreadsPerBlock, dev)(
-        get_block_table_cuda_v2<kSparseTopK, kHeadGroup, kSparseBlockSize>,
+        get_block_table_cuda_blockwise<kSparseTopK, kHeadGroup, kSparseBlockSize>,
         static_cast<const int*>(topk_idx.data_ptr()),
         static_cast<const int*>(block_table.data_ptr()),
         static_cast<const int*>(token_to_bs.data_ptr()),
@@ -207,7 +206,7 @@ void get_block_table(
         n_token);
   } else {
     LaunchKernel(num_blocks, kThreadsPerBlock, dev)(
-        get_block_table_cuda_v3<kSparseTopK, kHeadGroup, kSparseBlockSize>,
+        get_block_table_cuda_elementwise<kSparseTopK, kHeadGroup, kSparseBlockSize>,
         static_cast<const int*>(topk_idx.data_ptr()),
         static_cast<const int*>(block_table.data_ptr()),
         static_cast<const int*>(token_to_bs.data_ptr()),

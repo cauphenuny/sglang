@@ -9,10 +9,7 @@ from sglang.kernels.jit.benchmark.utils import (
     get_benchmark_range,
     run_benchmark,
 )
-from sglang.kernels.jit.minicpm_sala import (
-    get_block_table_v2,
-    get_block_table_v3,
-)
+from sglang.kernels.jit.minicpm_sala import get_block_table
 from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(
@@ -30,14 +27,11 @@ TOKEN_NUM_LIST = get_benchmark_range(
 
 configs = list(itertools.product(TOKEN_NUM_LIST))
 
-_VERSION_FNS = {
-    "v2": get_block_table_v2,
-    "v3": get_block_table_v3,
-}
+_ELEMENTWISE = {"blockwise": False, "elementwise": True}
 
 
 def _make_valid_inputs(token_num: int, topk: int, device: str = DEFAULT_DEVICE):
-    """Well-formed inputs (only non-negative block indices) shared by v2/v3.
+    """Well-formed inputs shared by both expansion strategies.
 
     ``seqlen_q_max`` is tied to ``token_num`` so the per-token causal position
     (``token_pos_in_bs``) never indexes past ``block_table``.
@@ -61,7 +55,7 @@ def _bench_one(token_num: int, provider: str):
     inputs = _make_valid_inputs(token_num, _TOPK)
 
     def fn():
-        return _VERSION_FNS[provider](*inputs)
+        return get_block_table(*inputs, elementwise=_ELEMENTWISE[provider])
 
     # Trigger JIT compilation + module caching before timing so it never
     # happens inside the CUDA graph capture done by run_benchmark.
@@ -76,8 +70,8 @@ def _bench_one(token_num: int, provider: str):
         x_names=["token_num"],
         x_vals=configs,
         line_arg="provider",
-        line_vals=["v2", "v3"],
-        line_names=["get_block_table_v2", "get_block_table_v3"],
+        line_vals=["blockwise", "elementwise"],
+        line_names=["blockwise", "elementwise"],
         styles=[("green", "-."), ("red", "--")],
         ylabel="us",
         plot_name="get-block-table-performance",
@@ -91,12 +85,12 @@ def benchmark(token_num: int, provider: str):
 if __name__ == "__main__":
     # Print a plain-text table directly instead of benchmark.run(), which pulls
     # in matplotlib via triton's plotting path (not always available locally).
-    header = f"{'token_num':>10} | {'v2 (us)':>12} {'v3 (us)':>12}"
+    header = f"{'token_num':>10} | {'blockwise (us)':>14} {'elementwise (us)':>16}"
     print(header)
     print("-" * len(header))
     for token_num in TOKEN_NUM_LIST:
         cells = []
-        for provider in ("v2", "v3"):
+        for provider in ("blockwise", "elementwise"):
             median_us, _, _ = _bench_one(token_num, provider)
             cells.append(f"{median_us:>12.3f}")
         print(f"{token_num:>10} | " + " ".join(cells))

@@ -503,11 +503,12 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
 
         def get_sparse_page_table(_topk, page_table, *_args, **_kwargs):
             self.assertEqual(page_table.tolist(), [[20, 21]])
+            self.assertFalse(_kwargs["elementwise"])
             return torch.tensor([[21]], dtype=torch.int32)
 
         with patch.object(
             backend_module,
-            "get_block_table_v2",
+            "get_block_table",
             side_effect=get_sparse_page_table,
         ):
             backend.forward_extend(q, k, v, layer, forward_batch)
@@ -574,13 +575,14 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
 
         with patch.object(
             backend_module,
-            "get_block_table_v3",
+            "get_block_table",
             return_value=torch.tensor([[3, 4]], dtype=torch.int32),
         ) as get_block_table:
             backend.forward_decode(q, k, v, layer, forward_batch)
 
         backend.get_topk_for_sparse.assert_called_once()
         get_block_table.assert_called_once()
+        self.assertTrue(get_block_table.call_args.kwargs["elementwise"])
         backend._compress_decode_keys.assert_not_called()
         backend.attention_adapter.forward.assert_called_once()
         backend.flash_attn_backend.forward_decode.assert_not_called()

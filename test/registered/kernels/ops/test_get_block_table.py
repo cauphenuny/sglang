@@ -1,10 +1,7 @@
 import pytest
 import torch
 
-from sglang.kernels.jit.minicpm_sala.get_block_table import (
-    get_block_table_v2,
-    get_block_table_v3,
-)
+from sglang.kernels.jit.minicpm_sala.get_block_table import get_block_table
 from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(est_time=30, stage="base-b-kernel-unit", runner_config="1-gpu-large")
@@ -14,7 +11,7 @@ _SPARSE_BLOCK_SIZE = 64
 
 
 def _make_inputs(token_num, seqlen_q_max, topk, batch_size=1, device="cuda"):
-    """Build the same kind of inputs as 3rdparty/sparse_kernel/ut/test_v2.py."""
+    """Build the same kind of inputs as the original CUDA kernel test."""
     topk_idx = torch.full(
         (_HEAD_GROUP, token_num, topk), -1, dtype=torch.int32, device=device
     )
@@ -88,12 +85,12 @@ def _get_block_table_reference(
 def test_get_block_table_supports_tp_local_head_group():
     inputs = _make_valid_inputs(64, 64, 96, head_group=1)
     expected = _get_block_table_reference(*inputs)
-    actual = get_block_table_v2(*inputs, head_group_num=1)
+    actual = get_block_table(*inputs, head_group_num=1, elementwise=False)
     assert torch.equal(expected, actual)
 
 
-def _golden_check_v2(out_block_table, block_table, token_num):
-    """The assertions ported verbatim from the original test_v2.py."""
+def _golden_check_blockwise(out_block_table, block_table, token_num):
+    """The assertions ported verbatim from the original kernel test."""
     # check token 32
     assert (out_block_table[32, 0] != 0).sum().item() == 33
     assert (out_block_table[32, 1] != 0).sum().item() == 33
@@ -117,22 +114,22 @@ def _golden_check_v2(out_block_table, block_table, token_num):
 
 
 @pytest.mark.parametrize("topk", [96, 128])
-def test_get_block_table_v2_golden(topk):
+def test_get_block_table_blockwise_golden(topk):
     token_num, seqlen_q_max = 8192, 8192
     inputs = _make_inputs(token_num, seqlen_q_max, topk)
-    out = get_block_table_v2(*inputs)
+    out = get_block_table(*inputs, elementwise=False)
     assert out.shape == (token_num, _HEAD_GROUP, topk * _SPARSE_BLOCK_SIZE)
-    _golden_check_v2(out, inputs[1], token_num)
+    _golden_check_blockwise(out, inputs[1], token_num)
 
 
 @pytest.mark.parametrize("topk", [96, 128])
-def test_get_block_table_versions_match_reference(topk):
-    """The prefill and decode kernels match the Torch reference, including -1."""
+def test_get_block_table_strategies_match_reference(topk):
+    """Both expansion strategies match the Torch reference, including -1."""
     token_num, seqlen_q_max = 2048, 2048
     inputs = _make_inputs(token_num, seqlen_q_max, topk)
     expected = _get_block_table_reference(*inputs)
-    assert torch.equal(expected, get_block_table_v2(*inputs))
-    assert torch.equal(expected, get_block_table_v3(*inputs))
+    assert torch.equal(expected, get_block_table(*inputs, elementwise=False))
+    assert torch.equal(expected, get_block_table(*inputs, elementwise=True))
 
 
 @pytest.mark.parametrize(("topk", "block_size"), [(10, 32), (7, 128)])
@@ -146,8 +143,8 @@ def test_get_block_table_supports_configured_layout(topk, block_size):
     )
     expected = _get_block_table_reference(*inputs, block_size=block_size)
     kwargs = {"head_group_num": _HEAD_GROUP, "block_size": block_size}
-    assert torch.equal(expected, get_block_table_v2(*inputs, **kwargs))
-    assert torch.equal(expected, get_block_table_v3(*inputs, **kwargs))
+    assert torch.equal(expected, get_block_table(*inputs, **kwargs, elementwise=False))
+    assert torch.equal(expected, get_block_table(*inputs, **kwargs, elementwise=True))
 
 
 if __name__ == "__main__":
