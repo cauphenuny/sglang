@@ -88,6 +88,7 @@ class MiniCPMFlashInferAdapter:
         head_dim: int,
         page_size: int,
         num_sparse_topk_tokens: int,
+        max_kv_tokens_per_row: int,
     ):
         if not is_flashinfer_available():
             raise RuntimeError("minicpm_flashinfer requires the flashinfer package.")
@@ -103,6 +104,7 @@ class MiniCPMFlashInferAdapter:
         self.head_dim = head_dim
         self.page_size = page_size
         self.num_sparse_topk_tokens = num_sparse_topk_tokens
+        self.max_kv_tokens_per_row = max_kv_tokens_per_row
         self.q_dtype = model_runner.dtype
         self.kv_dtype = model_runner.kv_cache_dtype
 
@@ -113,7 +115,7 @@ class MiniCPMFlashInferAdapter:
             device=self.device,
         )
         self.kv_indices = torch.zeros(
-            max_sparse_bs * num_sparse_topk_tokens,
+            max_sparse_bs * max_kv_tokens_per_row,
             dtype=torch.int32,
             device=self.device,
         )
@@ -208,7 +210,7 @@ class MiniCPMFlashInferAdapter:
             kv_indptr = self.kv_indptr[: sparse_bs + 1]
             kv_indptr[0] = 0
             torch.cumsum(cache_seqlens, dim=0, out=kv_indptr[1:])
-            kv_indices = self.kv_indices[: sparse_bs * self.num_sparse_topk_tokens]
+            kv_indices = self.kv_indices[: sparse_bs * self.max_kv_tokens_per_row]
             kv_last_page_len = self.kv_last_page_len[:sparse_bs]
             kv_last_page_len.copy_((cache_seqlens > 0).to(torch.int32))
             rows = self.rows[:sparse_bs]

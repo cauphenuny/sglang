@@ -127,6 +127,7 @@ def test_flashinfer_graph_uses_backend_wrapper_cache():
     adapter.head_dim = 16
     adapter.page_size = 1
     adapter.num_sparse_topk_tokens = 4
+    adapter.max_kv_tokens_per_row = 4
     adapter.q_dtype = torch.float16
     adapter.kv_dtype = torch.float16
     adapter.kv_indptr = torch.zeros(3, dtype=torch.int32)
@@ -152,3 +153,43 @@ def test_flashinfer_graph_uses_backend_wrapper_cache():
     )
     wrapper.begin_forward.assert_called_once()
     assert adapter.active_wrapper is wrapper
+
+
+def test_flashinfer_decode_indices_cover_dense_rows():
+    wrapper = SimpleNamespace(begin_forward=Mock())
+    flashinfer_backend = SimpleNamespace(decode_wrappers=[wrapper])
+    model_runner = SimpleNamespace(
+        device=torch.device("cpu"),
+        dtype=torch.float16,
+        kv_cache_dtype=torch.float16,
+        req_to_token_pool=SimpleNamespace(size=1),
+    )
+
+    with (
+        patch.object(adapter_module, "is_flashinfer_available", return_value=True),
+        patch(
+            "sglang.srt.layers.attention.flashinfer_backend.FlashInferAttnBackend",
+            return_value=flashinfer_backend,
+        ),
+    ):
+        adapter = MiniCPMFlashInferAdapter(
+            model_runner,
+            head_group_num=2,
+            heads_per_group=16,
+            head_dim=128,
+            page_size=1,
+            num_sparse_topk_tokens=4,
+            max_kv_tokens_per_row=7,
+        )
+
+    metadata = _metadata(rows=2)
+    metadata.sparse_cache_seqlens_int32.fill_(7)
+    adapter.prepare_forward(
+        metadata,
+        is_prefill=False,
+        graph=False,
+        in_capture=False,
+    )
+
+    assert adapter.kv_indices.numel() == 14
+    assert adapter.active_kv_indices.numel() == 14

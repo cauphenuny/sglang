@@ -258,6 +258,10 @@ class MiniCPMSparseBackend(AttentionBackend):
                 head_dim=self.head_dim,
                 page_size=self.page_size,
                 num_sparse_topk_tokens=self.num_sparse_topk_tokens,
+                max_kv_tokens_per_row=max(
+                    self.dense_len,
+                    self.num_sparse_topk_tokens,
+                ),
             )
             if use_flashinfer
             else MiniCPMFlashAttentionAdapter(self.flash_attn_backend)
