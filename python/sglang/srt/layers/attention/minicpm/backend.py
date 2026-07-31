@@ -75,6 +75,20 @@ def _transpose_head_group_layout(
         )
 
 
+def _copy_dense_page_table(
+    destination: torch.Tensor,
+    destination_row: int,
+    source: torch.Tensor,
+    source_row: int,
+    kv_len: int,
+    head_group_num: int,
+) -> None:
+    for group in range(head_group_num):
+        destination[destination_row + group, :kv_len] = (
+            source[source_row, :kv_len] * head_group_num + group
+        )
+
+
 class MiniCPMSparseBackend(AttentionBackend):
     """MiniCPM sparse dispatch layered on the standard FlashAttention backend."""
 
@@ -803,7 +817,7 @@ class MiniCPMSparseBackend(AttentionBackend):
 
             sparse_page_table_sparse_bs = get_block_table_v2(
                 topk_idx,
-                page_table,
+                page_table[metadata.sparse_bs_list],
                 metadata.token_to_bs,
                 metadata.token_pos_in_bs,
                 metadata.seqlen_k_sparse_bs_tensor,
@@ -863,11 +877,14 @@ class MiniCPMSparseBackend(AttentionBackend):
                     len_, forward_batch.extend_seq_lens_cpu[dense_bs]
                 )
                 dense_layout_spans.append((ps, len_))
-                group_num = self.head_group_num
-                for group in range(group_num):
-                    metadata.sparse_page_table[
-                        sparse_page_table_idx_start + group, :kv_len
-                    ] = (page_table[dense_bs, :kv_len] * group_num + group)
+                _copy_dense_page_table(
+                    metadata.sparse_page_table,
+                    sparse_page_table_idx_start,
+                    page_table,
+                    dense_bs,
+                    kv_len,
+                    self.head_group_num,
+                )
 
         q_by_head_group = q.contiguous().view(-1, self.heads_per_group, layer.head_dim)
         _transpose_head_group_layout(
@@ -982,6 +999,17 @@ class MiniCPMSparseBackend(AttentionBackend):
         metadata.sparse_page_table[:sparse_rows, : self.num_sparse_topk_tokens] = (
             sparse_page_table[:, : self.num_sparse_topk_tokens]
         )
+        for dense_bs in range(bs):
+            kv_len = int(forward_batch.seq_lens_cpu[dense_bs])
+            if kv_len < self.dense_len:
+                _copy_dense_page_table(
+                    metadata.sparse_page_table,
+                    dense_bs * self.head_group_num,
+                    page_table,
+                    dense_bs,
+                    kv_len,
+                    self.head_group_num,
+                )
 
         q_reshaped_by_head_group = q_reshaped.reshape(
             -1, self.heads_per_group, layer.head_dim
