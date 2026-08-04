@@ -34,7 +34,6 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from sglang.srt.arg_groups.arg_utils import resolvable_fields
-from sglang.srt.configs.minicpm import MiniCPMHybridConfig
 from sglang.srt.environ import envs
 from sglang.srt.model_executor.cuda_graph_config import Backend
 from sglang.srt.utils.common import (
@@ -751,12 +750,10 @@ def _moss_vl_overrides(server_args: Any, hf_config: Any) -> dict:
 
 @_register_for("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM")
 def _minicpm_sala_overrides(server_args: Any, hf_config: Any) -> dict:
-    if isinstance(hf_config, MiniCPMHybridConfig):
-        has_sparse_attention = hf_config.has_minicpm_sparse_attention
-        has_hybrid_attention = has_sparse_attention or hf_config.has_lightning_layers
-    else:
-        has_sparse_attention = False
-        has_hybrid_attention = False
+    has_sparse_attention = getattr(hf_config, "has_minicpm_sparse_attention", False)
+    has_hybrid_attention = has_sparse_attention or getattr(
+        hf_config, "has_lightning_layers", False
+    )
     overrides: Dict[str, Any] = {}
     if has_hybrid_attention:
         overrides["disable_radix_cache"] = True

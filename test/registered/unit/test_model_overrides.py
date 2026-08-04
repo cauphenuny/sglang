@@ -368,6 +368,27 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                         "minicpm_flashattn",
                     )
 
+    def test_minicpm_overrides_use_config_capabilities(self):
+        args = SimpleNamespace(
+            attention_backend=None,
+            prefill_attention_backend=None,
+            decode_attention_backend=None,
+            disaggregation_mode="null",
+            is_attention_backend_not_set=lambda: True,
+        )
+        config = SimpleNamespace(
+            has_minicpm_sparse_attention=True,
+            has_lightning_layers=False,
+        )
+
+        with patch.object(
+            overrides_module, "is_blackwell_supported", return_value=False
+        ):
+            overrides = overrides_module._minicpm_sala_overrides(args, config)
+
+        self.assertTrue(overrides["disable_radix_cache"])
+        self.assertEqual(overrides["attention_backend"], "minicpm_flashattn")
+
     def test_sparse_minicpm_defaults_to_flashinfer_on_blackwell(self):
         with patch.object(
             overrides_module,
