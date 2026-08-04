@@ -789,12 +789,17 @@ class MiniCPMSparseBackend(AttentionBackend):
             is_prefill=False,
         )
         if topk_idx is not None:
+            topk_page_table = page_table
+            topk_cache_seqlens = cache_seqlens
+            if not self._use_cuda_graph_buffers:
+                topk_page_table = page_table[metadata.sparse_bs_list]
+                topk_cache_seqlens = cache_seqlens[metadata.sparse_bs_list]
             sparse_page_table = get_block_table(
                 topk_idx,
-                page_table[metadata.sparse_bs_list],
+                topk_page_table,
                 metadata.token_to_bs,
-                cache_seqlens[metadata.sparse_bs_list],
-                cache_seqlens[metadata.sparse_bs_list],
+                topk_cache_seqlens,
+                topk_cache_seqlens,
                 head_group_num=self.head_group_num,
                 block_size=self.block_size,
                 elementwise=True,

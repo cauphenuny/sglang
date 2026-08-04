@@ -37,6 +37,16 @@ class _DeviceOffsetsMustNotBeRead:
         raise AssertionError("prefill layers must use scheduler-derived CPU offsets")
 
 
+class _GraphTensorMustNotUseHostListIndex:
+    def __init__(self, tensor):
+        self.tensor = tensor
+
+    def __getitem__(self, index):
+        if isinstance(index, list):
+            raise AssertionError("CUDA graph tensors must not use host list indices")
+        return self.tensor[index]
+
+
 class _SingleTensorConversion:
     def __init__(self, values):
         self.values = values
@@ -684,7 +694,9 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         )
         backend.forward_metadata = sparse_utils.MiniCPMSparseMetadata(
             base=SimpleNamespace(
-                page_table=torch.tensor([[5, 6, 7, 0, 0], [8, 9, 10, 11, 12]]),
+                page_table=_GraphTensorMustNotUseHostListIndex(
+                    torch.tensor([[5, 6, 7, 0, 0], [8, 9, 10, 11, 12]])
+                ),
                 cache_seqlens_int32=torch.tensor([3, 5], dtype=torch.int32),
             ),
             sparse_bs_list=[0, 1],
