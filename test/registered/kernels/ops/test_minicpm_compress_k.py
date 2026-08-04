@@ -1,5 +1,8 @@
 import torch
 
+from sglang.srt.layers.attention.minicpm.fuse_kernel import (
+    fused_attn_pooling_online_topk_decode,
+)
 from sglang.srt.layers.attention.minicpm.sparse_utils import compress_k_core_new
 from sglang.test.ci.ci_register import register_cuda_ci
 
@@ -41,3 +44,33 @@ def test_compress_k_writes_each_head_once():
     )
     torch.testing.assert_close(full_compressed, expected)
     torch.testing.assert_close(key_cache[7:9], expected[1:])
+
+
+def test_fused_decode_topk_skips_dense_rows():
+    kernel = fused_attn_pooling_online_topk_decode(
+        batch_size=2,
+        groups=16,
+        heads=16,
+        dim=128,
+        topk=8,
+        pooled_k_len=8,
+        dense_len=5,
+        dtype_str="bfloat16",
+    )
+    topk_indices = torch.full((1, 2, 8), -1, dtype=torch.int32, device="cuda")
+    topk_values = torch.full(
+        (1, 2, 8), float("-inf"), dtype=torch.float32, device="cuda"
+    )
+
+    kernel(
+        torch.randn(32, 1, 128, dtype=torch.bfloat16, device="cuda"),
+        torch.randn(4, 1, 128, dtype=torch.bfloat16, device="cuda"),
+        torch.tensor([0, 1, 2], dtype=torch.int32, device="cuda"),
+        torch.tensor([0, 2, 4], dtype=torch.int32, device="cuda"),
+        torch.tensor([3, 7], dtype=torch.int32, device="cuda"),
+        topk_indices,
+        topk_values,
+    )
+
+    assert torch.all(topk_indices[:, 0] == -1)
+    assert torch.any(topk_indices[:, 1] >= 0)

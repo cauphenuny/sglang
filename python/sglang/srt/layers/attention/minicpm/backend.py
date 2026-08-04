@@ -262,6 +262,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             "num_offs": pooling_num_offs,
             "kernel_stride": self.kernel_stride,
             "block_size": self.block_size,
+            "dense_len": self.dense_len,
             "init_blocks": self.init_blocks,
             "local_blocks": self.local_blocks,
             "dtype_str": dtype_str,

@@ -22,6 +22,7 @@ def _fused_attn_pooling_online_topk(
     max_seqlen_q_grid: int,  # Static param for grid (use bucketing)
     pooled_k_len: int,  # Static param (use bucketing) = ceil(max_seqlen_k / block_size)
     is_causal: bool,
+    dense_len: int = 0,
     m_block_dim: int = 16,
     block_M: int = 16,
     block_N: int = 64,
@@ -148,6 +149,10 @@ def _fused_attn_pooling_online_topk(
 
             # Chunk prefill: cache_len from tensor (0 for standard prefill, >0 for chunk prefill)
             cache_len = cache_lens[batch_idx]
+            if not is_causal:
+                active = cache_len + 1 >= dense_len
+                q_current_seqlen = T.if_then_else(active, q_current_seqlen, 0)
+                k_current_seqlen = T.if_then_else(active, k_current_seqlen, 0)
             if is_causal:
                 actual_pooled_k_len = (
                     k_current_seqlen - 1 + pad_len
