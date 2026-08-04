@@ -1055,6 +1055,127 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             self.assertEqual(level.cu_new_token_nums.numel(), 4)
             self.assertEqual(level.cu_total_compress_token_nums.numel(), 4)
 
+    def test_sparse_graph_replay_pads_metadata_for_missing_request(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        backend.head_group_num = 2
+        backend.k1_kernel_stride = 2
+        backend.k2_kernel_stride = 4
+        backend.max_context_len = 8
+        backend.req_to_sparse_k1_token = torch.arange(8).reshape(4, 2)
+        backend.req_to_sparse_k2_token = torch.arange(8).reshape(4, 2)
+        backend.decode_cuda_graph_metadata = {
+            "compress_k1": torch.empty(16, 1, 1),
+            "compress_k2": torch.empty(8, 1, 1),
+        }
+
+        def level(history, cumulative):
+            return CompressionLevelMetadata(
+                history_compress_token_nums=torch.tensor(history),
+                cu_seqlens=torch.tensor(cumulative),
+                cu_new_token_nums=torch.tensor(cumulative),
+                cu_total_compress_token_nums=torch.tensor(cumulative),
+            )
+
+        decode_metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(),
+            sparse_cache_seqlens_int32=torch.tensor([1, 1, 2, 2, 3, 3]),
+            sparse_cu_seqlens_k=torch.tensor([0, 1, 2, 4, 6, 9, 12]),
+        )
+        compression_metadata = (
+            level([1, 2, 3], [0, 1, 3, 6]),
+            level([4, 5, 6], [0, 4, 9, 15]),
+        )
+        backend._build_sparse_decode_replay_metadata = Mock(
+            return_value=(decode_metadata, compression_metadata)
+        )
+
+        def graph_level():
+            return CompressionLevelMetadata(
+                table=torch.full((4, 2), -1),
+                history_compress_token_nums=torch.full((4,), -1),
+                cu_seqlens=torch.full((5,), -1),
+                cu_new_token_nums=torch.full((5,), -1),
+                cu_total_compress_token_nums=torch.full((5,), -1),
+            )
+
+        metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(cache_seqlens_int32=torch.tensor([2, 3, 4, 0])),
+            k1=graph_level(),
+            k2=graph_level(),
+            sparse_cache_seqlens_int32=torch.full((8,), -1),
+            sparse_cu_seqlens_k=torch.full((9,), -1),
+            cache_seqlens_int32_stage1=torch.full((4,), -1),
+        )
+        forward_batch = SimpleNamespace(
+            batch_size=4,
+            num_padding=1,
+            req_pool_indices=torch.arange(4),
+            seq_lens_cpu=torch.tensor([2, 3, 4, 0]),
+        )
+
+        backend._replay_sparse_graph_metadata(forward_batch, metadata)
+
+        self.assertEqual(
+            metadata.sparse_cache_seqlens_int32.tolist(), [1, 1, 2, 2, 3, 3, 0, 0]
+        )
+        self.assertEqual(
+            metadata.sparse_cu_seqlens_k.tolist(), [0, 1, 2, 4, 6, 9, 12, 12, 12]
+        )
+        self.assertEqual(metadata.cache_seqlens_int32_stage1.tolist(), [1, 2, 3, 0])
+        for compression, expected_history, expected_cumulative in (
+            (metadata.k1, [1, 2, 3, 0], [0, 1, 3, 6, 6]),
+            (metadata.k2, [4, 5, 6, 0], [0, 4, 9, 15, 15]),
+        ):
+            self.assertEqual(
+                compression.history_compress_token_nums.tolist(), expected_history
+            )
+            self.assertEqual(compression.cu_seqlens.tolist(), expected_cumulative)
+            self.assertEqual(
+                compression.cu_new_token_nums.tolist(), expected_cumulative
+            )
+            self.assertEqual(
+                compression.cu_total_compress_token_nums.tolist(), expected_cumulative
+            )
+
+    def test_idle_sparse_graph_replay_clears_compression_lengths(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+
+        def graph_level():
+            return CompressionLevelMetadata(
+                history_compress_token_nums=torch.ones(2, dtype=torch.int32),
+                cu_seqlens=torch.ones(3, dtype=torch.int32),
+                cu_new_token_nums=torch.ones(3, dtype=torch.int32),
+                cu_total_compress_token_nums=torch.ones(3, dtype=torch.int32),
+            )
+
+        metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(),
+            k1=graph_level(),
+            k2=graph_level(),
+            sparse_cache_seqlens_int32=torch.ones(2, dtype=torch.int32),
+            sparse_cu_seqlens_k=torch.ones(3, dtype=torch.int32),
+            cache_seqlens_int32_stage1=torch.ones(2, dtype=torch.int32),
+        )
+
+        backend._replay_sparse_graph_metadata(
+            SimpleNamespace(batch_size=2, num_padding=2), metadata
+        )
+
+        for tensor in (
+            metadata.sparse_cache_seqlens_int32,
+            metadata.sparse_cu_seqlens_k,
+            metadata.cache_seqlens_int32_stage1,
+            metadata.k1.history_compress_token_nums,
+            metadata.k1.cu_seqlens,
+            metadata.k1.cu_new_token_nums,
+            metadata.k1.cu_total_compress_token_nums,
+            metadata.k2.history_compress_token_nums,
+            metadata.k2.cu_seqlens,
+            metadata.k2.cu_new_token_nums,
+            metadata.k2.cu_total_compress_token_nums,
+        ):
+            self.assertEqual(torch.count_nonzero(tensor).item(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1031,6 +1031,11 @@ class MiniCPMSparseBackend(AttentionBackend):
             metadata.sparse_cache_seqlens_int32.zero_()
             metadata.sparse_cu_seqlens_k.zero_()
             metadata.cache_seqlens_int32_stage1.zero_()
+            for level in (metadata.k1, metadata.k2):
+                level.history_compress_token_nums.zero_()
+                level.cu_seqlens.zero_()
+                level.cu_new_token_nums.zero_()
+                level.cu_total_compress_token_nums.zero_()
             return
 
         sparse_forward_batch = SimpleNamespace(
@@ -1083,7 +1088,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         if real_bs < bs:
             metadata.sparse_cache_seqlens_int32[real_sparse_rows:].zero_()
             metadata.sparse_cu_seqlens_k[real_sparse_rows + 1 :].fill_(
-                decode_metadata["sparse_cu_seqlens_k"][-1]
+                decode_metadata.sparse_cu_seqlens_k[-1]
             )
             metadata.cache_seqlens_int32_stage1[real_bs:].zero_()
 
