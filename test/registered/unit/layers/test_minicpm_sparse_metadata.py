@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -877,13 +879,13 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend.prefill_kernel_max_seqlen_q_grid = 64
 
         with (
-            patch.object(
-                backend_module,
+            patch(
+                "sglang.srt.layers.attention.minicpm.fuse_kernel."
                 "fused_attn_pooling_online_topk_prefill",
                 return_value="prefill",
             ) as prefill,
-            patch.object(
-                backend_module,
+            patch(
+                "sglang.srt.layers.attention.minicpm.fuse_kernel."
                 "fused_attn_pooling_online_topk_decode",
                 return_value="decode",
             ) as decode,
@@ -907,6 +909,30 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             max_seqlen_q_grid=64,
         )
         decode.assert_called_once_with(topk=8, batch_size=3)
+
+    def test_backend_import_does_not_require_tilelang(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                """
+import builtins
+
+original_import = builtins.__import__
+
+def import_without_tilelang(name, *args, **kwargs):
+    if name == "tilelang" or name.startswith("tilelang."):
+        raise ModuleNotFoundError(name)
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = import_without_tilelang
+import sglang.srt.layers.attention.minicpm.backend
+""",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_forward_metadata_tracks_cuda_graph_buffer_ownership(self):
         """Only replay metadata may be marked as backed by CUDA graph buffers."""

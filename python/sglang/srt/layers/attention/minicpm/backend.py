@@ -18,21 +18,14 @@ from sglang.srt.layers.attention.minicpm.attention_adapter import (
 from sglang.srt.layers.attention.minicpm.cache import attach_compressed_cache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.runtime_context import get_parallel
-from sglang.srt.utils import is_blackwell_supported
+from sglang.srt.utils import is_blackwell_supported, next_power_of_2
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
 
 
-import tilelang
-import tilelang.math
-
 from sglang.kernels.jit.minicpm_sala import get_block_table
-from sglang.srt.layers.attention.minicpm.fuse_kernel import (
-    fused_attn_pooling_online_topk_decode,
-    fused_attn_pooling_online_topk_prefill,
-)
 from sglang.srt.layers.attention.minicpm.sparse_utils import (
     CompressionLevelMetadata,
     MiniCPMSparseMetadata,
@@ -197,16 +190,16 @@ class MiniCPMSparseBackend(AttentionBackend):
         output_topk = min(self.sparse_topk, pooled_k_len)
 
         # For the kernel, we need power of 2 topk
-        topk_power2 = tilelang.math.next_power_of_2(output_topk)
+        topk_power2 = next_power_of_2(output_topk)
         kernel_topk = min(topk_power2, pooled_k_len)
         # Make sure it's still power of 2
-        if kernel_topk != tilelang.math.next_power_of_2(kernel_topk):
-            kernel_topk = tilelang.math.next_power_of_2(kernel_topk) // 2
+        if kernel_topk != next_power_of_2(kernel_topk):
+            kernel_topk = next_power_of_2(kernel_topk) // 2
         kernel_topk = max(8, kernel_topk)
         self.kernel_topk = kernel_topk
         self.decode_fused_kernels = {}
         self.prefill_fused_kernels = {}
-        bucketed_pooled_k_len = tilelang.math.next_power_of_2(pooled_k_len)
+        bucketed_pooled_k_len = next_power_of_2(pooled_k_len)
 
         pooling_block_stride = self.block_size // self.kernel_stride  # = 64 // 16 = 4
         pooling_pad_len = (
@@ -257,6 +250,11 @@ class MiniCPMSparseBackend(AttentionBackend):
     def _get_fused_topk_kernel(self, batch_size: int, *, is_prefill: bool):
         if not self.minicpm_fuse_topk:
             return None
+
+        from sglang.srt.layers.attention.minicpm.fuse_kernel import (
+            fused_attn_pooling_online_topk_decode,
+            fused_attn_pooling_online_topk_prefill,
+        )
 
         cache = self.prefill_fused_kernels if is_prefill else self.decode_fused_kernels
         if batch_size not in cache:
