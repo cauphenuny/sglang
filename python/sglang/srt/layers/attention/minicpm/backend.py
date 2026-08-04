@@ -354,46 +354,19 @@ class MiniCPMSparseBackend(AttentionBackend):
         forward_batch: ForwardBatch,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         metadata = self.forward_metadata
-        if self._use_cuda_graph_buffers:
-            compressed_k = self.decode_cuda_graph_metadata["compress_k1"][
-                : forward_batch.batch_size
-                * self.max_context_len
-                // self.k1_kernel_stride,
-                :,
-                :,
-            ]
-            compressed_k2 = self.decode_cuda_graph_metadata["compress_k2"][
-                : forward_batch.batch_size
-                * self.max_context_len
-                // self.k2_kernel_stride,
-                :,
-                :,
-            ]
-        else:
-            compressed_k = torch.full(
-                (
-                    forward_batch.batch_size
-                    * self.max_context_len
-                    // self.k1_kernel_stride,
-                    layer.tp_k_head_num,
-                    layer.head_dim,
-                ),
-                dtype=query_states.dtype,
-                device=self.device,
-                fill_value=float("-inf"),
-            )
-            compressed_k2 = torch.full(
-                (
-                    forward_batch.batch_size
-                    * self.max_context_len
-                    // self.k2_kernel_stride,
-                    layer.tp_k_head_num,
-                    layer.head_dim,
-                ),
-                dtype=query_states.dtype,
-                device=self.device,
-                fill_value=float("-inf"),
-            )
+        compressed = []
+        for name, level in (("k1", metadata.k1), ("k2", metadata.k2)):
+            total = level.cu_seqlens_cpu[-1]
+            if self._use_cuda_graph_buffers:
+                buffer = self.decode_cuda_graph_metadata[f"compress_{name}"][:total]
+            else:
+                buffer = torch.empty(
+                    (total, layer.tp_k_head_num, layer.head_dim),
+                    dtype=query_states.dtype,
+                    device=self.device,
+                )
+            compressed.append(buffer)
+        compressed_k, compressed_k2 = compressed
 
         get_compress_k_v2(
             layer=layer,
@@ -1057,16 +1030,13 @@ class MiniCPMSparseBackend(AttentionBackend):
             metadata.base.cache_seqlens_int32[:real_bs] - 1
         )
 
-        for (name, kernel_stride, req_to_sparse), src in zip(
+        for (name, req_to_sparse), src in zip(
             (
-                ("k1", self.k1_kernel_stride, self.req_to_sparse_k1_token),
-                ("k2", self.k2_kernel_stride, self.req_to_sparse_k2_token),
+                ("k1", self.req_to_sparse_k1_token),
+                ("k2", self.req_to_sparse_k2_token),
             ),
             compression_metadata,
         ):
-            self.decode_cuda_graph_metadata[f"compress_{name}"][
-                : real_bs * self.max_context_len // kernel_stride
-            ].fill_(float("-inf"))
             dst = getattr(metadata, name)
             dst.history_compress_token_nums[:real_bs].copy_(
                 src.history_compress_token_nums

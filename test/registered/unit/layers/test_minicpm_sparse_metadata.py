@@ -835,7 +835,10 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
 
     def test_decode_compression_uses_compact_layout(self):
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
-        backend.forward_metadata = SimpleNamespace()
+        backend.forward_metadata = SimpleNamespace(
+            k1=SimpleNamespace(cu_seqlens_cpu=[0, 2, 3]),
+            k2=SimpleNamespace(cu_seqlens_cpu=[0, 1, 1]),
+        )
         backend.max_context_len = 8
         backend.k1_kernel_size = 2
         backend.k1_kernel_stride = 2
@@ -859,8 +862,8 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                         forward_batch,
                     )
 
-                self.assertEqual(k1.shape, (8, 1, 2))
-                self.assertEqual(k2.shape, (4, 1, 2))
+                self.assertEqual(k1.shape, (3, 1, 2))
+                self.assertEqual(k2.shape, (1, 1, 2))
                 compress.assert_called_once()
                 self.assertNotIn("padded", compress.call_args.kwargs)
 
