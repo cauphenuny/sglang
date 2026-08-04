@@ -14,6 +14,7 @@ from sglang.srt.layers.attention.minicpm.attention_adapter import (
 )
 from sglang.srt.layers.attention.minicpm.backend import (
     MiniCPMSparseBackend,
+    _gather_compressed_keys,
     _transpose_head_group_layout,
 )
 from sglang.srt.layers.attention.minicpm.sparse_utils import CompressionLevelMetadata
@@ -66,6 +67,15 @@ class _SingleTensorConversion:
 
 
 class TestMiniCPMSparseMetadata(CustomTestCase):
+    def test_gathered_compressed_offsets_stay_int32(self):
+        compressed = torch.arange(5).reshape(5, 1, 1)
+        level = SimpleNamespace(cu_seqlens_cpu=[0, 2, 5])
+
+        _, cu_seqlens = _gather_compressed_keys(compressed, level, [1])
+
+        self.assertEqual(cu_seqlens.dtype, torch.int32)
+        self.assertEqual(cu_seqlens.tolist(), [0, 3])
+
     def test_registered_variants_select_adapter_explicitly(self):
         runner = object()
 

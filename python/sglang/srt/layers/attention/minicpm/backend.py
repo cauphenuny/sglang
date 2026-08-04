@@ -95,7 +95,7 @@ def _gather_compressed_keys(
     )
     compact_cu_seqlens = torch.tensor(
         [0, *lengths], dtype=torch.int32, device=full_compressed_k.device
-    ).cumsum(0)
+    ).cumsum(0, dtype=torch.int32)
     return compact_k, compact_cu_seqlens
 
 
