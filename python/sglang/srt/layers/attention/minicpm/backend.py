@@ -417,7 +417,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             else:
                 query_states = batched_gather(
                     query_states.reshape(-1, layer.tp_q_head_num, layer.head_dim),
-                    metadata.base.cu_seqlens_q,
+                    forward_batch.extend_seq_lens_cpu,
                     sparse_bs,
                 )
                 for full_compressed_k, level in (

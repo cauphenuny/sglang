@@ -968,7 +968,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend.forward_metadata = SimpleNamespace(
             sparse_bs_list=[1],
             base=SimpleNamespace(
-                cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32),
+                cu_seqlens_q=_DeviceOffsetsMustNotBeRead(),
             ),
             topk_cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
             topk_cu_seqlens_k=torch.tensor([0, 1], dtype=torch.int32),
@@ -990,7 +990,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend.dense_len = 1
         backend.max_context_len = 1
         layer = SimpleNamespace(tp_q_head_num=1, tp_k_head_num=1, head_dim=1)
-        forward_batch = SimpleNamespace(batch_size=2)
+        forward_batch = SimpleNamespace(batch_size=2, extend_seq_lens_cpu=[1, 1])
 
         with (
             patch.object(

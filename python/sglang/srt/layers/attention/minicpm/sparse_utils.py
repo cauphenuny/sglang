@@ -6,6 +6,7 @@ combining both backend-agnostic sparse attention components and kernel utilities
 
 from __future__ import annotations
 
+from itertools import accumulate
 from typing import TYPE_CHECKING, Optional
 
 import msgspec
@@ -28,23 +29,9 @@ from sglang.srt.layers.attention.minicpm.sparse_kernels import (
 from sglang.srt.model_executor.forward_context import get_token_to_kv_pool
 
 
-def batched_gather(a, cu_seqlen_q, select):
-    select_bs = len(select)
-    select = torch.tensor(select, device="cpu")
-    starts = cu_seqlen_q[select]
-    ends = cu_seqlen_q[select + 1]
-    lengths = ends - starts
-
-    max_len = lengths.max()
-    local_offsets = torch.arange(max_len, device=a.device)[None, :]
-    mask = local_offsets < lengths[:, None]
-
-    local_offsets = local_offsets.expand(select_bs, -1)[mask]
-
-    starts_expanded = starts.repeat_interleave(lengths)
-    index = starts_expanded + local_offsets
-
-    return a[index]
+def batched_gather(a, lengths_cpu, select):
+    offsets = [0, *accumulate(map(int, lengths_cpu))]
+    return torch.cat([a[offsets[i] : offsets[i + 1]] for i in select])
 
 
 def compress_k_core_new(
@@ -531,17 +518,18 @@ def _build_k1_k2_compression_metadata(
     )
 
 
-def _get_sparse_cache_len(
-    seq_len: int,
+def _get_sparse_cache_lens(
+    seq_lens: torch.Tensor,
     sparse_capacity: int,
     block_size: int,
-) -> int:
-    if seq_len <= sparse_capacity:
-        return seq_len
-    remainder = seq_len % block_size
-    return (
-        sparse_capacity if remainder == 0 else sparse_capacity - block_size + remainder
+) -> torch.Tensor:
+    remainder = seq_lens % block_size
+    sparse_lens = torch.where(
+        remainder == 0,
+        sparse_capacity,
+        sparse_capacity - block_size + remainder,
     )
+    return torch.where(seq_lens <= sparse_capacity, seq_lens, sparse_lens)
 
 
 def _plan_sparse_prefill(
@@ -582,17 +570,16 @@ def _plan_sparse_prefill(
             row_q_lens.extend([1] * (query_len * head_group_num))
             token_to_bs.extend([sparse_batch_idx] * query_len)
             token_pos_in_bs.extend(range(prefix_len + 1, prefix_len + query_len + 1))
-            for token_offset in range(1, query_len + 1):
-                sparse_cache_seqlens.extend(
-                    [
-                        _get_sparse_cache_len(
-                            prefix_len + token_offset,
-                            sparse_capacity,
-                            block_size,
-                        )
-                    ]
-                    * head_group_num
-                )
+            token_seq_lens = torch.arange(
+                prefix_len + 1,
+                prefix_len + query_len + 1,
+                dtype=torch.int32,
+            )
+            sparse_cache_seqlens.extend(
+                _get_sparse_cache_lens(token_seq_lens, sparse_capacity, block_size)
+                .repeat_interleave(head_group_num)
+                .tolist()
+            )
             max_sparse_cache_len = max(max_sparse_cache_len, sparse_capacity)
         else:
             dense_layout.append((batch_idx, row_start, query_group_start, query_len))
@@ -669,34 +656,17 @@ def _plan_sparse_decode(
     bs = forward_batch.batch_size
     cache_seqlens = base_metadata.cache_seqlens_int32
     page_table = base_metadata.page_table
-    max_sparse_cache_len = 0
-
-    sparse_cache_seqlens_cpu = torch.zeros(
-        (bs * head_group_num,), dtype=cache_seqlens.dtype, device="cpu"
+    seq_lens_cpu = torch.as_tensor(
+        forward_batch.seq_lens_cpu, dtype=cache_seqlens.dtype, device="cpu"
     )
-
-    for b in range(bs):
-        seq_len = int(forward_batch.seq_lens_cpu[b])
-        if seq_len >= dense_len:
-            sparse_cache_len = _get_sparse_cache_len(
-                seq_len,
-                sparse_topk * block_size,
-                block_size,
-            )
-
-            if sparse_cache_len > max_sparse_cache_len:
-                max_sparse_cache_len = sparse_cache_len
-
-            sparse_cache_seqlens_cpu[b * head_group_num : (b + 1) * head_group_num] = (
-                sparse_cache_len
-            )
-        else:
-            if seq_len > max_sparse_cache_len:
-                max_sparse_cache_len = seq_len
-
-            sparse_cache_seqlens_cpu[b * head_group_num : (b + 1) * head_group_num] = (
-                seq_len
-            )
+    sparse_capacity = sparse_topk * block_size
+    cache_lens_cpu = torch.where(
+        seq_lens_cpu >= dense_len,
+        _get_sparse_cache_lens(seq_lens_cpu, sparse_capacity, block_size),
+        seq_lens_cpu,
+    )
+    max_sparse_cache_len = int(cache_lens_cpu.max())
+    sparse_cache_seqlens_cpu = cache_lens_cpu.repeat_interleave(head_group_num)
 
     sparse_cache_seqlens_int32 = sparse_cache_seqlens_cpu.to(
         device=cache_seqlens.device
