@@ -76,6 +76,45 @@ def _copy_dense_page_table(
         )
 
 
+def _gather_compressed_keys(
+    full_compressed_k: torch.Tensor,
+    level: CompressionLevelMetadata,
+    batches: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    lengths = [
+        level.cu_seqlens_cpu[batch + 1] - level.cu_seqlens_cpu[batch]
+        for batch in batches
+    ]
+    compact_k = torch.cat(
+        [
+            full_compressed_k[
+                level.cu_seqlens_cpu[batch] : level.cu_seqlens_cpu[batch + 1]
+            ]
+            for batch in batches
+        ]
+    )
+    compact_cu_seqlens = torch.tensor(
+        [0, *lengths], dtype=torch.int32, device=full_compressed_k.device
+    ).cumsum(0)
+    return compact_k, compact_cu_seqlens
+
+
+def _copy_dense_page_tables(
+    metadata: MiniCPMSparseMetadata,
+    seq_lens_cpu,
+    head_group_num: int,
+) -> None:
+    for dense_bs, row_start, _, _ in metadata.dense_layout:
+        _copy_dense_page_table(
+            metadata.sparse_page_table,
+            row_start,
+            metadata.base.page_table,
+            dense_bs,
+            int(seq_lens_cpu[dense_bs]),
+            head_group_num,
+        )
+
+
 class MiniCPMSparseBackend(AttentionBackend):
     """MiniCPM sparse dispatch layered on the standard FlashAttention backend."""
 
@@ -293,15 +332,9 @@ class MiniCPMSparseBackend(AttentionBackend):
                 sparse_topk=self.sparse_topk,
                 block_size=self.block_size,
             )
-            for dense_bs, row_start, _, _ in metadata.dense_layout:
-                _copy_dense_page_table(
-                    metadata.sparse_page_table,
-                    row_start,
-                    metadata.base.page_table,
-                    dense_bs,
-                    int(forward_batch.seq_lens_cpu[dense_bs]),
-                    self.head_group_num,
-                )
+            _copy_dense_page_tables(
+                metadata, forward_batch.seq_lens_cpu, self.head_group_num
+            )
         else:
             _plan_sparse_decode(
                 forward_batch=forward_batch,
@@ -312,14 +345,18 @@ class MiniCPMSparseBackend(AttentionBackend):
                 block_size=self.block_size,
             )
 
+            _copy_dense_page_tables(
+                metadata, forward_batch.seq_lens_cpu, self.head_group_num
+            )
+
             # Stage1 optimization metadata for decode mode
-            metadata.cache_seqlens_int32_stage1 = metadata.base.cache_seqlens_int32 - 1
+            metadata.cache_seqlens_int32_stage1 = (
+                metadata.base.cache_seqlens_int32[metadata.sparse_bs_list] - 1
+            )
             metadata.cu_seqlens_q_adjusted = (
-                metadata.base.cu_seqlens_q * self.heads_per_group
+                metadata.topk_cu_seqlens_q * self.heads_per_group
             )
-            metadata.max_seqlen_q_adjusted = (
-                metadata.base.max_seq_len_q * self.heads_per_group
-            )
+            metadata.max_seqlen_q_adjusted = self.heads_per_group
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         if forward_batch.forward_mode.is_target_verify():
@@ -422,22 +459,9 @@ class MiniCPMSparseBackend(AttentionBackend):
                     (full_compressed_k1, metadata.k1),
                     (full_compressed_k2, metadata.k2),
                 ):
-                    lengths = [
-                        level.cu_seqlens_cpu[bs + 1] - level.cu_seqlens_cpu[bs]
-                        for bs in sparse_bs
-                    ]
-                    compact_k = torch.cat(
-                        [
-                            full_compressed_k[
-                                level.cu_seqlens_cpu[bs] : level.cu_seqlens_cpu[bs + 1]
-                            ]
-                            for bs in sparse_bs
-                        ]
+                    compressed.append(
+                        _gather_compressed_keys(full_compressed_k, level, sparse_bs)
                     )
-                    compact_cu_seqlens = torch.tensor(
-                        [0, *lengths], dtype=torch.int32, device=key_states.device
-                    ).cumsum(0)
-                    compressed.append((compact_k, compact_cu_seqlens))
 
             (compressed_k, compressed_cu_seqlens), (
                 compressed_k2,
@@ -468,18 +492,35 @@ class MiniCPMSparseBackend(AttentionBackend):
                 forward_batch,
             )
 
+            sparse_bs = metadata.sparse_bs_list
+            if not sparse_bs:
+                return None
+
+            cu_seqlens_q = metadata.base.cu_seqlens_q
+            compressed_cu_seqlens = metadata.k1.cu_seqlens
+            compressed_cu_seqlens2 = metadata.k2.cu_seqlens
+            if len(sparse_bs) < forward_batch.batch_size:
+                query_states = query_states[sparse_bs]
+                compressed_k, compressed_cu_seqlens = _gather_compressed_keys(
+                    compressed_k, metadata.k1, sparse_bs
+                )
+                compressed_k2, compressed_cu_seqlens2 = _gather_compressed_keys(
+                    compressed_k2, metadata.k2, sparse_bs
+                )
+                cu_seqlens_q = metadata.topk_cu_seqlens_q
+
             ret = self.sparse_get_topk_impl(
                 query_states,
-                metadata.base.cu_seqlens_q,
+                cu_seqlens_q,
                 metadata.base.cu_seqlens_k,
                 1,
                 metadata.base.max_seq_len_k,
                 compressed_k=compressed_k,
-                compressed_cu_seqlens=metadata.k1.cu_seqlens,
+                compressed_cu_seqlens=compressed_cu_seqlens,
                 compressed_k2=compressed_k2,
-                compressed_cu_seqlens2=metadata.k2.cu_seqlens,
+                compressed_cu_seqlens2=compressed_cu_seqlens2,
                 fused_kernel=self._get_fused_topk_kernel(
-                    forward_batch.batch_size,
+                    len(sparse_bs),
                     is_prefill=False,
                 ),
             )
@@ -747,31 +788,30 @@ class MiniCPMSparseBackend(AttentionBackend):
             forward_batch=forward_batch,
             is_prefill=False,
         )
-        sparse_page_table = get_block_table(
-            topk_idx,
-            page_table,
-            metadata.token_to_bs,
-            cache_seqlens,
-            cache_seqlens,
-            head_group_num=self.head_group_num,
-            block_size=self.block_size,
-            elementwise=True,
-        ).reshape(-1, self.num_sparse_topk_tokens)
-        sparse_rows = self.head_group_num * bs
-        metadata.sparse_page_table[:sparse_rows, : self.num_sparse_topk_tokens] = (
-            sparse_page_table[:, : self.num_sparse_topk_tokens]
-        )
-        for dense_bs in range(bs):
-            kv_len = int(forward_batch.seq_lens_cpu[dense_bs])
-            if kv_len < self.dense_len:
-                _copy_dense_page_table(
-                    metadata.sparse_page_table,
-                    dense_bs * self.head_group_num,
-                    page_table,
-                    dense_bs,
-                    kv_len,
-                    self.head_group_num,
+        if topk_idx is not None:
+            sparse_page_table = get_block_table(
+                topk_idx,
+                page_table[metadata.sparse_bs_list],
+                metadata.token_to_bs,
+                cache_seqlens[metadata.sparse_bs_list],
+                cache_seqlens[metadata.sparse_bs_list],
+                head_group_num=self.head_group_num,
+                block_size=self.block_size,
+                elementwise=True,
+            ).reshape(-1, self.num_sparse_topk_tokens)
+            destination = metadata.sparse_page_table[:, : self.num_sparse_topk_tokens]
+            if self._use_cuda_graph_buffers:
+                destination.copy_(
+                    torch.where(
+                        (cache_seqlens >= self.dense_len).repeat_interleave(
+                            self.head_group_num
+                        )[:, None],
+                        sparse_page_table,
+                        destination,
+                    )
                 )
+            else:
+                destination[metadata.sparse_idx] = sparse_page_table
 
         q_reshaped_by_head_group = q_reshaped.reshape(
             -1, self.heads_per_group, layer.head_dim
@@ -953,6 +993,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         metadata.sparse_cu_seqlens_k = buffers["sparse_cu_seqlens_k"][: sparse_rows + 1]
         metadata.token_to_bs = buffers["token_to_bs"][:bs]
         metadata.sparse_page_table = buffers["sparse_page_table"][:sparse_rows]
+        metadata.sparse_bs_list = list(range(bs))
 
         assume_kv_len = self.config_dense_len
         if in_capture:
@@ -969,6 +1010,7 @@ class MiniCPMSparseBackend(AttentionBackend):
             level = CompressionLevelMetadata()
             setattr(metadata, name, level)
             level_len = max(0, (assume_kv_len - kernel_size) // kernel_stride + 1)
+            level.cu_seqlens_cpu = [index * level_len for index in range(bs + 1)]
             level.cu_seqlens = buffers[f"{name}.cu_seqlens"][: bs + 1]
             if in_capture:
                 level.cu_seqlens.copy_(
@@ -1026,6 +1068,10 @@ class MiniCPMSparseBackend(AttentionBackend):
         )
         metadata.cache_seqlens_int32_stage1[:real_bs].copy_(
             metadata.base.cache_seqlens_int32[:real_bs] - 1
+        )
+        metadata.dense_layout = decode_metadata.dense_layout
+        _copy_dense_page_tables(
+            metadata, forward_batch.seq_lens_cpu, self.head_group_num
         )
 
         for (name, req_to_sparse), src in zip(

@@ -619,7 +619,9 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                 cache_seqlens_int32=torch.tensor([3], dtype=torch.int32),
                 max_seq_len_q=1,
             ),
-            sparse_page_table=torch.zeros((1, 4), dtype=torch.int32),
+            sparse_bs_list=[],
+            sparse_idx=[],
+            sparse_page_table=torch.tensor([[5, 6, 7, 0]], dtype=torch.int32),
             sparse_cache_seqlens_int32=torch.tensor([3], dtype=torch.int32),
             sparse_cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
             sparse_cu_seqlens_k=torch.tensor([0, 3], dtype=torch.int32),
@@ -633,8 +635,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         backend.dense_len = 4
         backend._use_cuda_graph_buffers = False
         backend._compress_decode_keys = Mock()
-        topk_idx = torch.tensor([[[0, 1]]], dtype=torch.int32)
-        backend.get_topk_for_sparse = Mock(return_value=topk_idx)
+        backend.get_topk_for_sparse = Mock(return_value=None)
         layer = SimpleNamespace(
             is_cross_attention=False,
             sliding_window_size=-1,
@@ -655,19 +656,84 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         with patch.object(
             backend_module,
             "get_block_table",
-            return_value=torch.tensor([[3, 4]], dtype=torch.int32),
         ) as get_block_table:
             backend.forward_decode(q, k, v, layer, forward_batch)
 
         backend.get_topk_for_sparse.assert_called_once()
-        get_block_table.assert_called_once()
-        self.assertTrue(get_block_table.call_args.kwargs["elementwise"])
+        get_block_table.assert_not_called()
         backend._compress_decode_keys.assert_not_called()
         backend.attention_adapter.forward.assert_called_once()
         backend.flash_attn_backend.forward_decode.assert_not_called()
         self.assertEqual(
             backend.forward_metadata.sparse_page_table[0, :3].tolist(),
             [5, 6, 7],
+        )
+
+    def test_graph_decode_preserves_dense_rows_from_sparse_topk(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        q = torch.ones(2, 1)
+        key_cache = torch.ones(8, 1, 1, 1)
+        value_cache = torch.ones(8, 1, 1, 1)
+        backend.flash_attn_backend = SimpleNamespace(
+            prepare_paged_mha_query=Mock(return_value=(q, None, None, None, None)),
+            get_paged_mha_kv_cache=Mock(return_value=(key_cache, value_cache)),
+        )
+        backend.token_to_kv_pool = SimpleNamespace(set_kv_buffer=Mock())
+        backend.attention_adapter = SimpleNamespace(
+            forward=Mock(return_value=torch.ones(2, 1, 1))
+        )
+        backend.forward_metadata = sparse_utils.MiniCPMSparseMetadata(
+            base=SimpleNamespace(
+                page_table=torch.tensor([[5, 6, 7, 0, 0], [8, 9, 10, 11, 12]]),
+                cache_seqlens_int32=torch.tensor([3, 5], dtype=torch.int32),
+            ),
+            sparse_bs_list=[0, 1],
+            sparse_idx=[0, 1],
+            token_to_bs=torch.tensor([0, 1], dtype=torch.int32),
+            sparse_page_table=torch.tensor([[5, 6, 7, 0, 0], [0, 0, 0, 0, 0]]),
+        )
+        backend.head_group_num = 1
+        backend.heads_per_group = 1
+        backend.page_size = 1
+        backend.block_size = 1
+        backend.num_sparse_topk_tokens = 2
+        backend.dense_len = 4
+        backend._use_cuda_graph_buffers = True
+        backend.get_topk_for_sparse = Mock(
+            return_value=torch.tensor([[[0, 1], [0, 1]]], dtype=torch.int32)
+        )
+        layer = SimpleNamespace(
+            is_cross_attention=False,
+            sliding_window_size=-1,
+            tp_q_head_num=1,
+            tp_k_head_num=1,
+            tp_v_head_num=1,
+            head_dim=1,
+            v_head_dim=1,
+            k_scale=None,
+            v_scale=None,
+        )
+        forward_batch = SimpleNamespace(
+            batch_size=2,
+            out_cache_loc=torch.tensor([1, 2], dtype=torch.int64),
+        )
+
+        with patch.object(
+            backend_module,
+            "get_block_table",
+            return_value=torch.tensor([[30, 31], [40, 41]], dtype=torch.int32),
+        ):
+            backend.forward_decode(
+                q,
+                torch.ones(2, 1, 1),
+                torch.ones(2, 1, 1),
+                layer,
+                forward_batch,
+            )
+
+        self.assertEqual(
+            backend.forward_metadata.sparse_page_table[:, :3].tolist(),
+            [[5, 6, 7], [40, 41, 0]],
         )
 
     def test_decode_metadata_supports_one_local_head_group(self):
@@ -724,6 +790,11 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             metadata.sparse_cache_seqlens_int32.tolist(),
             [64, 64, 72, 72],
         )
+        self.assertEqual(metadata.sparse_bs_list, [1])
+        self.assertEqual(metadata.sparse_idx, [2, 3])
+        self.assertEqual(metadata.dense_layout, [(0, 0, 0, 1)])
+        self.assertEqual(metadata.token_to_bs.tolist(), [0])
+        self.assertEqual(metadata.topk_cu_seqlens_q.tolist(), [0, 1])
 
     def test_cuda_graph_page_table_covers_dense_decode(self):
         """Captured dense decode must reserve a threshold-sized page table."""
@@ -785,6 +856,8 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             in_capture=True,
         )
         self.assertIsNotNone(capture_metadata.k1)
+        self.assertEqual(capture_metadata.k1.cu_seqlens_cpu, [0, 511])
+        self.assertEqual(capture_metadata.k2.cu_seqlens_cpu, [0, 127])
         self.assertFalse(hasattr(base_metadata, "k1"))
 
         base_metadata.cu_seqlens_k.copy_(torch.tensor([0, 7], dtype=torch.int32))
@@ -868,6 +941,79 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                 self.assertEqual(k2.shape, (1, 1, 2))
                 compress.assert_called_once()
                 self.assertNotIn("padded", compress.call_args.kwargs)
+
+    def test_dense_decode_maintains_compressed_cache_without_topk(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        backend.forward_metadata = SimpleNamespace(sparse_bs_list=[])
+        backend._compress_decode_keys = Mock(
+            return_value=(torch.empty(0), torch.empty(0))
+        )
+        backend.sparse_get_topk_impl = Mock()
+        layer = SimpleNamespace()
+        forward_batch = SimpleNamespace(batch_size=1)
+
+        result = backend.get_topk_for_sparse(
+            query_states=torch.empty(1, 1, 1),
+            key_states=torch.empty(1, 1, 1),
+            layer=layer,
+            forward_batch=forward_batch,
+            is_prefill=False,
+        )
+
+        self.assertIsNone(result)
+        backend._compress_decode_keys.assert_called_once()
+        backend.sparse_get_topk_impl.assert_not_called()
+
+    def test_mixed_decode_runs_topk_for_sparse_requests_only(self):
+        backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
+        backend.forward_metadata = SimpleNamespace(
+            sparse_bs_list=[1],
+            base=SimpleNamespace(
+                cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32),
+                cu_seqlens_k=torch.tensor([0, 3, 8], dtype=torch.int32),
+                max_seq_len_k=5,
+            ),
+            topk_cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            topk_cu_seqlens_k=torch.tensor([0, 5], dtype=torch.int32),
+            topk_max_seqlen_k=5,
+            k1=SimpleNamespace(
+                cu_seqlens=torch.tensor([0, 1, 3], dtype=torch.int32),
+                cu_seqlens_cpu=[0, 1, 3],
+            ),
+            k2=SimpleNamespace(
+                cu_seqlens=torch.tensor([0, 1, 2], dtype=torch.int32),
+                cu_seqlens_cpu=[0, 1, 2],
+            ),
+        )
+        backend._compress_decode_keys = Mock(
+            return_value=(
+                torch.tensor([[[10.0]], [[20.0]], [[21.0]]]),
+                torch.tensor([[[30.0]], [[31.0]]]),
+            )
+        )
+        backend._get_fused_topk_kernel = Mock(return_value="kernel")
+        backend.sparse_get_topk_impl = Mock(return_value="topk")
+        forward_batch = SimpleNamespace(batch_size=2)
+
+        result = backend.get_topk_for_sparse(
+            query_states=torch.tensor([[[1.0]], [[2.0]]]),
+            key_states=torch.empty(2, 1, 1),
+            layer=SimpleNamespace(),
+            forward_batch=forward_batch,
+            is_prefill=False,
+        )
+
+        self.assertEqual(result, "topk")
+        args = backend.sparse_get_topk_impl.call_args.args
+        kwargs = backend.sparse_get_topk_impl.call_args.kwargs
+        self.assertEqual(args[0].flatten().tolist(), [2.0])
+        self.assertEqual(args[1].tolist(), [0, 1])
+        self.assertEqual(args[2].tolist(), [0, 3, 8])
+        self.assertEqual(kwargs["compressed_k"].flatten().tolist(), [20.0, 21.0])
+        self.assertEqual(kwargs["compressed_cu_seqlens"].tolist(), [0, 2])
+        self.assertEqual(kwargs["compressed_k2"].flatten().tolist(), [31.0])
+        self.assertEqual(kwargs["compressed_cu_seqlens2"].tolist(), [0, 1])
+        backend._get_fused_topk_kernel.assert_called_once_with(1, is_prefill=False)
 
     def test_fused_topk_kernels_compile_lazily_per_batch_size(self):
         """Startup must not compile fused kernels for batch sizes that never run."""
@@ -1107,6 +1253,8 @@ import sglang.srt.layers.attention.minicpm.backend
 
         decode_metadata = sparse_utils.MiniCPMSparseMetadata(
             base=SimpleNamespace(),
+            sparse_idx=[2, 3, 4, 5],
+            dense_layout=[(0, 0, 0, 1)],
             sparse_cache_seqlens_int32=torch.tensor([1, 1, 2, 2, 3, 3]),
             sparse_cu_seqlens_k=torch.tensor([0, 1, 2, 4, 6, 9, 12]),
         )
@@ -1128,9 +1276,15 @@ import sglang.srt.layers.attention.minicpm.backend
             )
 
         metadata = sparse_utils.MiniCPMSparseMetadata(
-            base=SimpleNamespace(cache_seqlens_int32=torch.tensor([2, 3, 4, 0])),
+            base=SimpleNamespace(
+                cache_seqlens_int32=torch.tensor([2, 3, 4, 0]),
+                page_table=torch.tensor(
+                    [[5, 6, 0, 0], [7, 8, 9, 0], [10, 11, 12, 13], [0, 0, 0, 0]]
+                ),
+            ),
             k1=graph_level(),
             k2=graph_level(),
+            sparse_page_table=torch.full((8, 4), -1, dtype=torch.int32),
             sparse_cache_seqlens_int32=torch.full((8,), -1),
             sparse_cu_seqlens_k=torch.full((9,), -1),
             cache_seqlens_int32_stage1=torch.full((4,), -1),
@@ -1151,6 +1305,8 @@ import sglang.srt.layers.attention.minicpm.backend
             metadata.sparse_cu_seqlens_k.tolist(), [0, 1, 2, 4, 6, 9, 12, 12, 12]
         )
         self.assertEqual(metadata.cache_seqlens_int32_stage1.tolist(), [1, 2, 3, 0])
+        self.assertEqual(metadata.sparse_page_table[0, :2].tolist(), [10, 12])
+        self.assertEqual(metadata.sparse_page_table[1, :2].tolist(), [11, 13])
         for compression, expected_history, expected_cumulative in (
             (metadata.k1, [1, 2, 3, 0], [0, 1, 3, 6, 6]),
             (metadata.k2, [4, 5, 6, 0], [0, 4, 9, 15, 15]),

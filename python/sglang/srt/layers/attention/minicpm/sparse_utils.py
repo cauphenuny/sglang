@@ -665,6 +665,14 @@ def _plan_sparse_decode(
         _get_sparse_cache_lens(seq_lens_cpu, sparse_capacity, block_size),
         seq_lens_cpu,
     )
+    sparse_mask_cpu = seq_lens_cpu >= dense_len
+    sparse_bs_list = sparse_mask_cpu.nonzero().flatten().tolist()
+    dense_bs_list = (~sparse_mask_cpu).nonzero().flatten().tolist()
+    sparse_idx = [
+        row
+        for batch_idx in sparse_bs_list
+        for row in range(batch_idx * head_group_num, (batch_idx + 1) * head_group_num)
+    ]
     max_sparse_cache_len = int(cache_lens_cpu.max())
     sparse_cache_seqlens_cpu = cache_lens_cpu.repeat_interleave(head_group_num)
 
@@ -680,7 +688,9 @@ def _plan_sparse_decode(
         dtype=torch.int32,
         device=base_metadata.cu_seqlens_q.device,
     )
-    token_to_bs = torch.arange(0, bs, dtype=torch.int32, device=page_table.device)
+    token_to_bs = torch.arange(
+        0, len(sparse_bs_list), dtype=torch.int32, device=page_table.device
+    )
     sparse_page_table = torch.zeros(
         (head_group_num * bs, max(dense_len, sparse_topk * block_size)),
         dtype=page_table.dtype,
@@ -691,4 +701,16 @@ def _plan_sparse_decode(
     metadata.sparse_cu_seqlens_k = sparse_cu_seqlens_k
     metadata.sparse_cu_seqlens_q = sparse_cu_seqlens_q
     metadata.sparse_page_table = sparse_page_table
+    metadata.sparse_bs_list = sparse_bs_list
+    metadata.sparse_idx = sparse_idx
+    metadata.dense_layout = [
+        (batch_idx, batch_idx * head_group_num, batch_idx * head_group_num, 1)
+        for batch_idx in dense_bs_list
+    ]
     metadata.token_to_bs = token_to_bs
+    metadata.topk_cu_seqlens_q = torch.arange(
+        0,
+        len(sparse_bs_list) + 1,
+        dtype=torch.int32,
+        device=base_metadata.cu_seqlens_q.device,
+    )
