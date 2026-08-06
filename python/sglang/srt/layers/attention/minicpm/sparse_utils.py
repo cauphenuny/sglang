@@ -673,7 +673,10 @@ def _plan_sparse_decode(
         for batch_idx in sparse_bs_list
         for row in range(batch_idx * head_group_num, (batch_idx + 1) * head_group_num)
     ]
-    max_sparse_cache_len = int(cache_lens_cpu.max())
+    max_sparse_cache_len = max(
+        int(cache_lens_cpu.max()),
+        sparse_capacity if sparse_bs_list else 0,
+    )
     sparse_cache_seqlens_cpu = cache_lens_cpu.repeat_interleave(head_group_num)
 
     sparse_cache_seqlens_int32 = sparse_cache_seqlens_cpu.to(
@@ -692,7 +695,7 @@ def _plan_sparse_decode(
         0, len(sparse_bs_list), dtype=torch.int32, device=page_table.device
     )
     sparse_page_table = torch.zeros(
-        (head_group_num * bs, max(dense_len, sparse_topk * block_size)),
+        (head_group_num * bs, max_sparse_cache_len),
         dtype=page_table.dtype,
         device=page_table.device,
     )

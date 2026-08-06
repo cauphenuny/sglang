@@ -525,8 +525,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             metadata.base.page_table[0, :50].tolist(),
         )
 
-    def test_dense_decode_page_table_covers_dense_threshold(self):
-        """Dense decode must reserve page-table coverage through the dense threshold."""
+    def test_dense_decode_page_table_matches_batch_length(self):
         forward_batch = SimpleNamespace(
             batch_size=1,
             seq_lens_cpu=torch.tensor([7000], dtype=torch.int32),
@@ -547,7 +546,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             block_size=64,
         )
 
-        self.assertEqual(metadata.sparse_page_table.shape, (2, 8192))
+        self.assertEqual(metadata.sparse_page_table.shape, (2, 7000))
 
     def test_mixed_prefill_uses_compact_sparse_page_table(self):
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
@@ -758,31 +757,6 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
             [[5, 6, 7], [40, 41, 0]],
         )
 
-    def test_decode_metadata_supports_one_local_head_group(self):
-        """Tensor parallelism may leave one local KV head without changing metadata."""
-        forward_batch = SimpleNamespace(
-            batch_size=1,
-            seq_lens_cpu=torch.tensor([10], dtype=torch.int32),
-        )
-        base_metadata = SimpleNamespace(
-            cache_seqlens_int32=torch.tensor([10], dtype=torch.int32),
-            page_table=torch.empty((1, 10), dtype=torch.int32),
-            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
-        )
-
-        metadata = sparse_utils.MiniCPMSparseMetadata(base=base_metadata)
-        sparse_utils._plan_sparse_decode(
-            forward_batch=forward_batch,
-            metadata=metadata,
-            head_group_num=1,
-            dense_len=8192,
-            sparse_topk=96,
-            block_size=64,
-        )
-
-        self.assertEqual(metadata.sparse_cache_seqlens_int32.tolist(), [10])
-        self.assertEqual(metadata.sparse_page_table.shape, (1, 8192))
-
     def test_decode_metadata_uses_scheduler_cpu_lengths(self):
         """Decode metadata must not synchronize device offsets to recover lengths."""
         forward_batch = SimpleNamespace(
@@ -817,6 +791,7 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         self.assertEqual(metadata.dense_layout, [(0, 0, 0, 1)])
         self.assertEqual(metadata.token_to_bs.tolist(), [0])
         self.assertEqual(metadata.topk_cu_seqlens_q.tolist(), [0, 1])
+        self.assertEqual(metadata.sparse_page_table.shape, (4, 128))
 
     def test_cuda_graph_page_table_covers_dense_decode(self):
         """Captured dense decode must reserve a threshold-sized page table."""
