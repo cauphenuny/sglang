@@ -1090,6 +1090,8 @@ def _minicpm_sala_overrides(server_args: Any, hf_config: Any) -> dict:
     )
     overrides: Dict[str, Any] = {}
     if has_hybrid_attention:
+        if server_args.enable_hierarchical_cache:
+            raise ValueError("MiniCPM SALA does not support hierarchical cache")
         overrides["disable_radix_cache"] = True
     if envs.SGLANG_MINICPM_FORCE_DENSE.get():
         dense_backends = {

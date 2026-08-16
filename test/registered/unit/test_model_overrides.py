@@ -300,6 +300,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
         decode_attention_backend=None,
         disaggregation_mode="null",
         enable_dp_attention=False,
+        enable_hierarchical_cache=False,
     ):
         args = SimpleNamespace(
             attention_backend=attention_backend,
@@ -307,6 +308,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
             decode_attention_backend=decode_attention_backend,
             disaggregation_mode=disaggregation_mode,
             enable_dp_attention=enable_dp_attention,
+            enable_hierarchical_cache=enable_hierarchical_cache,
         )
         args.is_attention_backend_not_set = lambda: all(
             backend is None
@@ -370,6 +372,19 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                         enable_dp_attention=True,
                     )
 
+    def test_minicpm_rejects_hierarchical_cache_for_hybrid_models(self):
+        for capability in ("sparse_attention", "lightning_attention"):
+            with self.subTest(capability=capability):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "MiniCPM SALA does not support hierarchical cache",
+                ):
+                    self._minicpm_overrides(
+                        "MiniCPMSALAForCausalLM",
+                        enable_hierarchical_cache=True,
+                        **{capability: True},
+                    )
+
     def test_sparse_minicpm_defaults_to_sparse_attention_backend(self):
         with patch.object(
             overrides_module,
@@ -393,6 +408,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
             decode_attention_backend=None,
             disaggregation_mode="null",
             enable_dp_attention=False,
+            enable_hierarchical_cache=False,
             is_attention_backend_not_set=lambda: True,
         )
         config = SimpleNamespace(
