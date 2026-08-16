@@ -140,7 +140,7 @@ def compress_k_complete_kernel_new(
                     # ====================================================================
 
                     # Accumulate over all tokens in this chunk
-                    acc = tl.zeros([head_dim], dtype=tl.float32)
+                    acc = tl.zeros([BLOCK_SIZE], dtype=tl.float32)
 
                     for token_offset in range(kernel_size):
                         # Compute k_indices for this token

@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from sglang.srt.layers.attention.minicpm.fuse_kernel import (
@@ -12,14 +13,14 @@ register_cuda_ci(est_time=10, stage="base-b-kernel-unit", runner_config="1-gpu-l
 def test_compress_k_writes_each_head_once():
     """Each compressed output must be produced once even with multiple KV heads."""
     key_cache = torch.arange(
-        9 * 2 * 4,
+        9 * 2 * 6,
         dtype=torch.float32,
         device="cuda",
-    ).reshape(9, 2, 4)
+    ).reshape(9, 2, 6)
     original = key_cache.clone()
     token_table = torch.tensor([[0, 0, 0, 1, 2, 3]], dtype=torch.int32, device="cuda")
     compressed_table = torch.tensor([[6, 7, 8]], dtype=torch.int32, device="cuda")
-    full_compressed = torch.empty((3, 2, 4), device="cuda")
+    full_compressed = torch.empty((3, 2, 6), device="cuda")
 
     compress_k_core_new(
         full_compressed,
@@ -74,3 +75,9 @@ def test_fused_decode_topk_skips_dense_rows():
 
     assert torch.all(topk_indices[:, 0] == -1)
     assert torch.any(topk_indices[:, 1] >= 0)
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main([__file__, "-v", "-s"]))
