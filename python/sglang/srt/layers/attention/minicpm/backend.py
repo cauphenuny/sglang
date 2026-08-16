@@ -198,6 +198,14 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.local_blocks = self.window_size // self.block_size  # local_blocks
         self.sparse_topk = topk + (self.window_size // self.block_size)
         self.num_sparse_topk_tokens = self.block_size * self.sparse_topk
+        required_context_len = max(
+            self.config_dense_len, self.num_sparse_topk_tokens
+        )
+        if self.max_context_len < required_context_len:
+            raise ValueError(
+                "MiniCPM sparse attention requires context_length >= "
+                f"{required_context_len}, got {self.max_context_len}."
+            )
 
         # Head group number derived from model configuration
         self.head_dim = model_runner.model_config.head_dim
@@ -267,9 +275,12 @@ class MiniCPMSparseBackend(AttentionBackend):
             "local_blocks": self.local_blocks,
             "dtype_str": dtype_str,
         }
-        self.prefill_kernel_max_seqlen_q_grid = (
-            model_runner.server_args.chunked_prefill_size
-        )
+        chunked_prefill_size = model_runner.server_args.chunked_prefill_size
+        if self.minicpm_fuse_topk and chunked_prefill_size <= 0:
+            raise ValueError(
+                "MiniCPM fused top-k requires a positive --chunked-prefill-size."
+            )
+        self.prefill_kernel_max_seqlen_q_grid = chunked_prefill_size
 
         self.attention_adapter = (
             MiniCPMFlashInferAdapter(

@@ -33,6 +33,76 @@ def _compression_layout():
     )
 
 
+def _construct_sparse_backend(
+    *,
+    max_context_len=256,
+    chunked_prefill_size=64,
+    use_flashinfer=False,
+    blackwell=False,
+):
+    req_pool = SimpleNamespace(
+        req_to_sparse_k1_token=torch.empty(0),
+        req_to_sparse_k2_token=torch.empty(0),
+    )
+    flash_attn_backend = SimpleNamespace(
+        max_context_len=max_context_len,
+        device="cpu",
+        decode_cuda_graph_metadata={},
+        req_to_token_pool=req_pool,
+        token_to_kv_pool=SimpleNamespace(),
+        page_size=1,
+    )
+    model_runner = SimpleNamespace(
+        dtype=torch.float16,
+        token_to_kv_pool_allocator=SimpleNamespace(),
+        server_args=SimpleNamespace(
+            enable_memory_saver=False,
+            chunked_prefill_size=chunked_prefill_size,
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                has_minicpm_sparse_attention=True,
+                sparse_config={
+                    "kernel_size": 32,
+                    "kernel_stride": 16,
+                    "init_blocks": 1,
+                    "block_size": 64,
+                    "window_size": 64,
+                    "dense_len": 128,
+                    "topk": 1,
+                },
+            ),
+            num_attention_heads=16,
+            head_dim=128,
+            get_num_kv_heads=lambda _tp: 1,
+        ),
+    )
+    with (
+        patch.object(backend_module, "MiniCPMHybridConfig", SimpleNamespace),
+        patch.object(
+            backend_module, "is_blackwell_supported", return_value=blackwell
+        ),
+        patch.object(
+            backend_module,
+            "FlashAttentionBackend",
+            return_value=flash_attn_backend,
+        ) as flash_attention,
+        patch.object(
+            backend_module,
+            "MiniCPMFlashInferAdapter",
+            return_value=object(),
+        ),
+        patch.object(
+            backend_module,
+            "get_parallel",
+            return_value=SimpleNamespace(attn_tp_size=1),
+        ),
+        patch.object(backend_module, "attach_compressed_cache"),
+    ):
+        backend = MiniCPMSparseBackend(model_runner, use_flashinfer=use_flashinfer)
+    return backend, model_runner, flash_attn_backend, flash_attention
+
+
 class _DeviceOffsetsMustNotBeRead:
     def __getitem__(self, _index):
         raise AssertionError("prefill layers must use scheduler-derived CPU offsets")
@@ -67,6 +137,24 @@ class _SingleTensorConversion:
 
 
 class TestMiniCPMSparseMetadata(CustomTestCase):
+    def test_sparse_backend_rejects_context_too_short_for_layout(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires context_length >= 128, got 64",
+        ):
+            _construct_sparse_backend(max_context_len=64)
+
+    def test_fused_topk_rejects_disabled_chunked_prefill(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires a positive --chunked-prefill-size",
+        ):
+            _construct_sparse_backend(
+                chunked_prefill_size=-1,
+                use_flashinfer=True,
+                blackwell=True,
+            )
+
     def test_gathered_compressed_offsets_stay_int32(self):
         compressed = torch.arange(5).reshape(5, 1, 1)
         level = SimpleNamespace(cu_seqlens_cpu=[0, 2, 5])
@@ -135,68 +223,10 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
 
     def test_flashattn_variant_uses_fa4_on_blackwell(self):
         """Blackwell must select FA4 because FA3 binaries cannot execute there."""
-        req_pool = SimpleNamespace(
-            req_to_sparse_k1_token=torch.empty(0),
-            req_to_sparse_k2_token=torch.empty(0),
+        backend, model_runner, flash_attn_backend, flash_attention = (
+            _construct_sparse_backend(blackwell=True)
         )
-        flash_attn_backend = SimpleNamespace(
-            max_context_len=256,
-            device="cpu",
-            decode_cuda_graph_metadata={},
-            req_to_token_pool=req_pool,
-            token_to_kv_pool=SimpleNamespace(),
-            kv_cache_dtype=torch.bfloat16,
-            kv_cache_dtype_str="bfloat16",
-            page_size=1,
-            fa_impl_ver=4,
-            num_splits=1,
-        )
-        hf_config = SimpleNamespace(
-            has_minicpm_sparse_attention=True,
-            sparse_config={
-                "kernel_size": 32,
-                "kernel_stride": 16,
-                "init_blocks": 1,
-                "block_size": 64,
-                "window_size": 64,
-                "dense_len": 128,
-                "topk": 1,
-            },
-        )
-        model_config = SimpleNamespace(
-            hf_config=hf_config,
-            num_attention_heads=16,
-            head_dim=128,
-            get_num_kv_heads=lambda _tp: 1,
-        )
-        model_runner = SimpleNamespace(
-            dtype=torch.float16,
-            token_to_kv_pool_allocator=SimpleNamespace(),
-            server_args=SimpleNamespace(
-                attention_backend="minicpm_flashattn",
-                disable_cuda_graph=False,
-                enable_memory_saver=False,
-                chunked_prefill_size=64,
-            ),
-            model_config=model_config,
-        )
-
-        with (
-            patch.object(backend_module, "MiniCPMHybridConfig", SimpleNamespace),
-            patch.object(backend_module, "is_blackwell_supported", return_value=True),
-            patch.object(
-                backend_module,
-                "FlashAttentionBackend",
-                return_value=flash_attn_backend,
-            ) as flash_attention,
-            patch.object(
-                backend_module,
-                "get_parallel",
-                return_value=SimpleNamespace(attn_tp_size=1),
-            ),
-            patch.object(backend_module, "attach_compressed_cache"),
-        ):
-            backend = MiniCPMSparseBackend(model_runner, use_flashinfer=False)
+        model_config = model_runner.model_config
 
         flash_attention.assert_called_once_with(
             model_runner,
