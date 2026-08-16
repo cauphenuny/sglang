@@ -12,7 +12,12 @@ from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
 from sglang.srt.layers.attention.linear.lightning_backend import (
     LightningAttentionBackend,
 )
-from sglang.srt.models.minicpm import MiniCPMAttention, MiniCPMLightningMixer
+from sglang.srt.models import minicpm as minicpm_module
+from sglang.srt.models.minicpm import (
+    MiniCPMAttention,
+    MiniCPMDecoderLayer,
+    MiniCPMLightningMixer,
+)
 from sglang.srt.runtime_context import get_parallel
 from sglang.test.ci.ci_register import register_cpu_ci
 
@@ -190,6 +195,26 @@ def test_minicpm_full_attention_bias_applies_to_every_projection():
     assert mixer.qkv_proj.bias is not None
     assert mixer.o_proj.bias is not None
     assert mixer.o_gate.bias is not None
+
+
+def test_minicpm_full_attention_uses_configured_head_dim(monkeypatch):
+    monkeypatch.setattr(minicpm_module, "SiluAndMul", torch.nn.Identity)
+    config = MiniCPMHybridConfig(
+        hidden_size=16,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=6,
+        intermediate_size=32,
+        attn_use_rope=False,
+    )
+
+    with get_parallel().override(tp_size=1, tp_rank=0):
+        layer = MiniCPMDecoderLayer(config)
+
+    assert layer.self_attn.head_dim == 6
+    assert layer.self_attn.q_size == 12
+    assert layer.self_attn.kv_size == 12
 
 
 def test_minicpm_lightning_reuses_shared_backend_and_cache_shape():

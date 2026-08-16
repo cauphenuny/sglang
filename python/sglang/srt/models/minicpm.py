@@ -91,6 +91,7 @@ class MiniCPMAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        head_dim: Optional[int] = None,
         layer_id: int = 0,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
@@ -117,7 +118,11 @@ class MiniCPMAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        self.head_dim = (
+            head_dim
+            if head_dim is not None
+            else hidden_size // self.total_num_heads
+        )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -381,6 +386,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
                 num_kv_heads=config.num_key_value_heads,
+                head_dim=getattr(config, "head_dim", None),
                 layer_id=layer_id,
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
