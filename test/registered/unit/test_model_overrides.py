@@ -299,12 +299,14 @@ class TestGoldenModelOverrides(_IsolatedPublish):
         prefill_attention_backend=None,
         decode_attention_backend=None,
         disaggregation_mode="null",
+        enable_dp_attention=False,
     ):
         args = SimpleNamespace(
             attention_backend=attention_backend,
             prefill_attention_backend=prefill_attention_backend,
             decode_attention_backend=decode_attention_backend,
             disaggregation_mode=disaggregation_mode,
+            enable_dp_attention=enable_dp_attention,
         )
         args.is_attention_backend_not_set = lambda: all(
             backend is None
@@ -356,6 +358,18 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                     ]
                 )
 
+    def test_minicpm_rejects_dp_attention(self):
+        for architecture in ("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"):
+            with self.subTest(architecture=architecture):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "MiniCPM does not support DP attention",
+                ):
+                    self._minicpm_overrides(
+                        architecture,
+                        enable_dp_attention=True,
+                    )
+
     def test_sparse_minicpm_defaults_to_sparse_attention_backend(self):
         with patch.object(
             overrides_module,
@@ -378,6 +392,7 @@ class TestGoldenModelOverrides(_IsolatedPublish):
             prefill_attention_backend=None,
             decode_attention_backend=None,
             disaggregation_mode="null",
+            enable_dp_attention=False,
             is_attention_backend_not_set=lambda: True,
         )
         config = SimpleNamespace(

@@ -1082,6 +1082,8 @@ def _moss_vl_overrides(server_args: Any, hf_config: Any) -> dict:
 
 @_register_for("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM")
 def _minicpm_sala_overrides(server_args: Any, hf_config: Any) -> dict:
+    if server_args.enable_dp_attention:
+        raise ValueError("MiniCPM does not support DP attention")
     has_sparse_attention = getattr(hf_config, "has_minicpm_sparse_attention", False)
     has_hybrid_attention = has_sparse_attention or getattr(
         hf_config, "has_lightning_layers", False
