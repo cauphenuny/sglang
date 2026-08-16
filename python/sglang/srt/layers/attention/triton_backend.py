@@ -12,6 +12,7 @@ from sglang.kernels.ops.kvcache.kv_indices import (
 )
 from sglang.srt.configs.hybrid_arch import (
     hybrid_gdn_config,
+    hybrid_lightning_config,
     kimi_linear_config,
     linear_attn_model_spec,
 )
@@ -198,6 +199,7 @@ class TritonAttnBackend(AttentionBackend):
             self.swa_v_head_dim = swa_v_head_dim
         elif (
             hybrid_gdn_config(model_runner.model_config) is not None
+            or hybrid_lightning_config(model_runner.model_config) is not None
             or kimi_linear_config(model_runner.model_config) is not None
             or linear_attn_model_spec(model_runner.model_config) is not None
         ):

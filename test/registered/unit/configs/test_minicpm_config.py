@@ -3,7 +3,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from sglang.srt.configs.linear_attn_model_registry import get_linear_attn_config
+from sglang.srt.configs.hybrid_arch import (
+    hybrid_lightning_config,
+    mambaish_config,
+)
+from sglang.srt.configs.linear_attn_model_registry import (
+    get_linear_attn_config,
+    get_linear_attn_spec_by_arch,
+)
 from sglang.srt.configs.mamba_utils import Mamba2CacheParams
 from sglang.srt.configs.minicpm import MiniCPMHybridConfig
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import (
@@ -226,8 +233,12 @@ def test_minicpm_lightning_reuses_shared_backend_and_cache_shape():
         lightning_head_dim=64,
     )
 
-    spec, _ = get_linear_attn_config(config)
-    assert spec.backend_class_name.endswith(".LightningAttentionBackend")
+    model_config = SimpleNamespace(
+        hf_config=config,
+        linear_attn_registry_result=get_linear_attn_config(config),
+    )
+    assert hybrid_lightning_config(model_config) is config
+    assert mambaish_config(model_config) is config
 
     with get_parallel().override(attn_tp_size=1):
         cache = config.mamba2_cache_params
@@ -243,6 +254,23 @@ def test_minicpm_lightning_reuses_shared_backend_and_cache_shape():
         )
     assert len(slopes) == 2
     assert slopes[0].equal(slopes[1])
+
+
+def test_non_lightning_minicpm_is_not_classified_as_linear_attention():
+    config = MiniCPMHybridConfig(
+        num_hidden_layers=1,
+        mixer_types=["minicpm4"],
+        sparse_config={},
+    )
+    model_config = SimpleNamespace(
+        hf_config=config,
+        linear_attn_registry_result=get_linear_attn_config(config),
+    )
+
+    assert hybrid_lightning_config(model_config) is None
+    assert mambaish_config(model_config) is None
+    for architecture in ("MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"):
+        assert get_linear_attn_spec_by_arch(architecture) is None
 
 
 def test_lightning_backend_reads_structural_linear_config(monkeypatch):

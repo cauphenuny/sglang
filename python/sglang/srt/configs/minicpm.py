@@ -1,9 +1,5 @@
 from transformers import PretrainedConfig
 
-from sglang.srt.configs.linear_attn_model_registry import (
-    LinearAttnModelSpec,
-    register_linear_attn_model,
-)
 from sglang.srt.configs.mamba_utils import Mamba2CacheParams, Mamba2StateShape
 from sglang.srt.runtime_context import get_parallel
 
@@ -196,16 +192,3 @@ class MiniCPMHybridConfig(PretrainedConfig):
     def lightning_layer_ids(self) -> list:
         """Get the indices of layers with lightning attention."""
         return [i for i, mt in enumerate(self.mixer_types) if mt == "lightning-attn"]
-
-
-register_linear_attn_model(
-    LinearAttnModelSpec(
-        config_class=MiniCPMHybridConfig,
-        backend_class_name=(
-            "sglang.srt.layers.attention.linear.lightning_backend.LightningAttentionBackend"
-        ),
-        arch_names=["MiniCPMForCausalLM", "MiniCPMSALAForCausalLM"],
-        uses_mamba_radix_cache=True,
-        support_mamba_cache=True,
-    )
-)
