@@ -198,9 +198,7 @@ class MiniCPMSparseBackend(AttentionBackend):
         self.local_blocks = self.window_size // self.block_size  # local_blocks
         self.sparse_topk = topk + (self.window_size // self.block_size)
         self.num_sparse_topk_tokens = self.block_size * self.sparse_topk
-        required_context_len = max(
-            self.config_dense_len, self.num_sparse_topk_tokens
-        )
+        required_context_len = max(self.config_dense_len, self.num_sparse_topk_tokens)
         if self.max_context_len < required_context_len:
             raise ValueError(
                 "MiniCPM sparse attention requires context_length >= "

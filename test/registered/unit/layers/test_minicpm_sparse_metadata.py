@@ -79,9 +79,7 @@ def _construct_sparse_backend(
     )
     with (
         patch.object(backend_module, "MiniCPMHybridConfig", SimpleNamespace),
-        patch.object(
-            backend_module, "is_blackwell_supported", return_value=blackwell
-        ),
+        patch.object(backend_module, "is_blackwell_supported", return_value=blackwell),
         patch.object(
             backend_module,
             "FlashAttentionBackend",
