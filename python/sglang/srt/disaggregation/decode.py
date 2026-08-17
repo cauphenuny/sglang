@@ -159,8 +159,19 @@ class DecodeReqToTokenPool:
     def available_size(self):
         return len(self.free_slots)
 
+    def reset_aux_cache_allocator(self) -> None:
+        pass
+
     def schedulable_token_capacity(self, physical_capacity: int) -> int:
         return physical_capacity
+
+    def alloc_aux_to_lengths(
+        self,
+        *,
+        req_pool_indices_cpu: torch.Tensor,
+        target_seq_lens_cpu: torch.Tensor,
+    ) -> None:
+        pass
 
     def alloc(self, reqs: List[Req]) -> Optional[List[int]]:
         # Indices of reqs that already have a req_pool_idx and will reuse
