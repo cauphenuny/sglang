@@ -279,6 +279,9 @@ class MiniCPMSparseBackend(AttentionBackend):
                 "MiniCPM fused top-k requires a positive --chunked-prefill-size."
             )
         self.prefill_kernel_max_seqlen_q_grid = chunked_prefill_size
+        if self.minicpm_fuse_topk:
+            for batch_size in range(1, model_runner.max_running_requests + 1):
+                self._get_fused_topk_kernel(batch_size, is_prefill=True)
 
         self.attention_adapter = (
             MiniCPMFlashInferAdapter(

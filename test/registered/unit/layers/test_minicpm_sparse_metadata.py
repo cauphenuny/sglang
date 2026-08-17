@@ -37,6 +37,7 @@ def _construct_sparse_backend(
     *,
     max_context_len=256,
     chunked_prefill_size=64,
+    max_running_requests=1,
     use_flashinfer=False,
     blackwell=False,
 ):
@@ -54,6 +55,7 @@ def _construct_sparse_backend(
     )
     model_runner = SimpleNamespace(
         dtype=torch.float16,
+        max_running_requests=max_running_requests,
         token_to_kv_pool_allocator=SimpleNamespace(),
         server_args=SimpleNamespace(
             enable_memory_saver=False,
@@ -262,6 +264,11 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
                 backend_module,
                 "get_parallel",
                 return_value=SimpleNamespace(attn_tp_size=1),
+            ),
+            patch(
+                "sglang.srt.layers.attention.minicpm.fuse_kernel."
+                "fused_attn_pooling_online_topk_prefill",
+                return_value="prefill",
             ),
             patch.object(backend_module, "attach_compressed_cache"),
         ):
@@ -1040,8 +1047,25 @@ class TestMiniCPMSparseMetadata(CustomTestCase):
         self.assertEqual(kwargs["compressed_cu_seqlens2"].tolist(), [0, 1])
         backend._get_fused_topk_kernel.assert_called_once_with(1, is_prefill=False)
 
-    def test_fused_topk_kernels_compile_lazily_per_batch_size(self):
-        """Startup must not compile fused kernels for batch sizes that never run."""
+    def test_fused_topk_prefill_kernels_compile_for_all_batches_at_startup(self):
+        with patch(
+            "sglang.srt.layers.attention.minicpm.fuse_kernel."
+            "fused_attn_pooling_online_topk_prefill",
+            side_effect=lambda **kwargs: f"prefill-{kwargs['batch_size']}",
+        ):
+            backend, *_ = _construct_sparse_backend(
+                max_running_requests=3,
+                use_flashinfer=True,
+                blackwell=True,
+            )
+
+        self.assertEqual(
+            backend.prefill_fused_kernels,
+            {1: "prefill-1", 2: "prefill-2", 3: "prefill-3"},
+        )
+        self.assertEqual(backend.decode_fused_kernels, {})
+
+    def test_fused_topk_kernels_cache_each_batch_size(self):
         backend = MiniCPMSparseBackend.__new__(MiniCPMSparseBackend)
         backend.minicpm_fuse_topk = True
         backend.decode_fused_kernels = {}
